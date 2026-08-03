@@ -3,8 +3,8 @@
 //! HTTP DELETE remains an unconditional destructive trigger. The table below
 //! adds non-DELETE operations whose blast radius warrants the same MCP
 //! elicitation gate. Every other non-GET operation is a normal mutation. The
-//! reviewed write counts deliberately fail when regenerated specs add a write,
-//! forcing the new operation through review before generated docs and CI pass.
+//! reviewed write inventory deliberately fails when regenerated specs change a
+//! write, forcing the operation through review before generated docs and CI pass.
 
 use crate::config::ServiceKind;
 
@@ -116,6 +116,26 @@ const HIGH_IMPACT_ROWS: &[SafetyRow] = &[
         kind: ServiceKind::Radarr,
         operation: "put_movie_editor",
     },
+    SafetyRow {
+        kind: ServiceKind::Prowlarr,
+        operation: "post_command",
+    },
+    SafetyRow {
+        kind: ServiceKind::Prowlarr,
+        operation: "post_system_backup_restore_by_id",
+    },
+    SafetyRow {
+        kind: ServiceKind::Prowlarr,
+        operation: "post_system_backup_restore_upload",
+    },
+    SafetyRow {
+        kind: ServiceKind::Prowlarr,
+        operation: "post_system_restart",
+    },
+    SafetyRow {
+        kind: ServiceKind::Prowlarr,
+        operation: "post_system_shutdown",
+    },
     // Overseerr administrative job controls and full Plex synchronization.
     SafetyRow {
         kind: ServiceKind::Overseerr,
@@ -189,14 +209,7 @@ const MUTATING_GET_ROWS: &[SafetyRow] = &[
     },
 ];
 
-const REVIEWED_WRITE_COUNTS: &[(ServiceKind, usize)] = &[
-    (ServiceKind::Sonarr, 113),
-    (ServiceKind::Radarr, 112),
-    (ServiceKind::Prowlarr, 59),
-    (ServiceKind::Overseerr, 71),
-    (ServiceKind::Jellyfin, 160),
-    (ServiceKind::Plex, 124), // 122 non-GET operations + two mutating GETs.
-];
+const REVIEWED_WRITE_INVENTORY: &str = include_str!("reviewed_write_inventory.txt");
 
 pub fn operation_safety(kind: ServiceKind, spec: &OperationSpec) -> OperationSafety {
     if spec.method.is_delete()
@@ -221,17 +234,77 @@ pub fn classify_operation(kind: ServiceKind, operation: &str) -> Option<Operatio
 }
 
 pub fn validate_write_inventory() -> Result<(), String> {
-    for &(kind, reviewed_count) in REVIEWED_WRITE_COUNTS {
-        let actual_count = super::operations_for_kind(kind)
-            .iter()
-            .filter(|spec| operation_safety(kind, spec) != OperationSafety::Read)
-            .count();
-        if actual_count != reviewed_count {
-            return Err(format!(
-                "{} generated write inventory changed: reviewed {reviewed_count}, found {actual_count}; classify and audit the new operation before regenerating tool docs",
-                kind.as_str()
-            ));
-        }
+    use std::collections::BTreeSet;
+
+    let actual = ServiceKind::ALL
+        .iter()
+        .copied()
+        .filter(|kind| super::is_generated(*kind))
+        .flat_map(|kind| {
+            super::operations_for_kind(kind)
+                .iter()
+                .filter_map(move |spec| {
+                    let safety = operation_safety(kind, spec);
+                    (safety != OperationSafety::Read).then(|| {
+                        format!(
+                            "{}.{}|{}|{safety:?}",
+                            kind.as_str(),
+                            spec.name,
+                            spec.method.as_str()
+                        )
+                    })
+                })
+        })
+        .collect::<BTreeSet<_>>();
+    let reviewed = REVIEWED_WRITE_INVENTORY
+        .lines()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if actual != reviewed {
+        let added = actual
+            .difference(&reviewed)
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = reviewed
+            .difference(&actual)
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "generated write inventory changed; added/changed: {added:?}; removed/changed: {removed:?}; classify and audit the exact operation, method, and safety before regenerating tool docs"
+        ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod row_coverage {
+    use super::*;
+
+    #[test]
+    fn every_high_impact_row_resolves_to_a_destructive_operation() {
+        for row in HIGH_IMPACT_ROWS {
+            assert_eq!(
+                classify_operation(row.kind, row.operation),
+                Some(OperationSafety::Destructive),
+                "{}.{} in HIGH_IMPACT_ROWS must resolve to a destructive operation",
+                row.kind.as_str(),
+                row.operation
+            );
+        }
+    }
+
+    #[test]
+    fn every_mutating_get_row_resolves_to_a_mutating_operation() {
+        for row in MUTATING_GET_ROWS {
+            assert_eq!(
+                classify_operation(row.kind, row.operation),
+                Some(OperationSafety::Mutating),
+                "{}.{} in MUTATING_GET_ROWS must resolve to a mutating operation",
+                row.kind.as_str(),
+                row.operation
+            );
+        }
+    }
 }

@@ -217,10 +217,11 @@ pub fn build_catalog(services: &[(String, ServiceKind)]) -> Vec<CatalogEntry> {
 }
 
 /// A catalog entry for one generated OpenAPI operation. The callable is
-/// `<service>.<op.name>(args)`; reads (GET/HEAD) are flagged `read`, mutations
-/// `write`, and DELETE ops `destructive` — metadata only, they dispatch
-/// immediately like any other write (see `docs/API.md`). The OpenAPI `tag` is
-/// surfaced as the capability for grouping.
+/// `<service>.<op.name>(args)`; operations are flagged `read`, `write`, or
+/// `destructive` according to [`crate::openapi::operation_safety`] (including
+/// audited high-impact non-DELETE operations). This is metadata only; calls
+/// dispatch like other writes (see `docs/API.md`). The OpenAPI `tag` is surfaced
+/// as the capability for grouping.
 fn operation_entry(
     service: &str,
     kind: ServiceKind,

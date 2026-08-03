@@ -58,7 +58,7 @@ scraping prose:
 |---|---|---|
 | `x-yarr-action-metadata` | `ACTION_SPECS` + `curated_commands()` | Per-action scope, params, mutability, destructive flag, capability, and allowed service kinds. |
 | `x-yarr-service-metadata` | `ServiceKind::descriptor()` | Per-kind capability, auth style, API prefix, resource noun, and path allowlist. |
-| `x-yarr-agent-guidance` | schema generator | Preferred first-pass reads, generic passthrough guidance, the elicitation model for destructive deletes, and response-shaping hints. |
+| `x-yarr-agent-guidance` | schema generator | Preferred first-pass reads, generic passthrough guidance, the elicitation model for destructive operations, and response-shaping hints. |
 | `properties.*.x-yarr-actions` | curated command descriptors | Lists which curated actions consume a lifted top-level param. |
 
 
@@ -90,7 +90,8 @@ curated commands for these kinds. Discover them
 with `codemode.search(query)` and inspect signatures / response types with
 `codemode.describe(path)`. Direct local CLI scripts use the operator's local
 trust boundary. MCP Code Mode re-authorizes every inner operation and requires
-client elicitation for DELETEs; clients without elicitation support fail closed.
+client elicitation for destructive operations, including explicitly audited
+non-DELETE operations; clients without elicitation support fail closed.
 
 | Kind | Supported callables | Explicitly omitted operations |
 |---|---:|---|
@@ -664,7 +665,7 @@ Every generated operation is classified below. `destructive (elicited)` includes
 | `prowlarr.post_applications_test` | `POST` | mutating |
 | `prowlarr.post_applications_testall` | `POST` | mutating |
 | `prowlarr.post_appprofile` | `POST` | mutating |
-| `prowlarr.post_command` | `POST` | mutating |
+| `prowlarr.post_command` | `POST` | destructive (elicited) |
 | `prowlarr.post_customfilter` | `POST` | mutating |
 | `prowlarr.post_downloadclient` | `POST` | mutating |
 | `prowlarr.post_downloadclient_action_by_name` | `POST` | mutating |
@@ -685,10 +686,10 @@ Every generated operation is classified below. `destructive (elicited)` includes
 | `prowlarr.post_notification_testall` | `POST` | mutating |
 | `prowlarr.post_search` | `POST` | mutating |
 | `prowlarr.post_search_bulk` | `POST` | mutating |
-| `prowlarr.post_system_backup_restore_by_id` | `POST` | mutating |
-| `prowlarr.post_system_backup_restore_upload` | `POST` | mutating |
-| `prowlarr.post_system_restart` | `POST` | mutating |
-| `prowlarr.post_system_shutdown` | `POST` | mutating |
+| `prowlarr.post_system_backup_restore_by_id` | `POST` | destructive (elicited) |
+| `prowlarr.post_system_backup_restore_upload` | `POST` | destructive (elicited) |
+| `prowlarr.post_system_restart` | `POST` | destructive (elicited) |
+| `prowlarr.post_system_shutdown` | `POST` | destructive (elicited) |
 | `prowlarr.post_tag` | `POST` | mutating |
 | `prowlarr.put_applications_bulk` | `PUT` | mutating |
 | `prowlarr.put_applications_by_id` | `PUT` | mutating |

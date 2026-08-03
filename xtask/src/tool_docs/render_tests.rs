@@ -17,8 +17,6 @@ fn small_render_helpers_are_stable() {
 #[test]
 fn generated_operation_report_includes_reviewed_safety_classification() {
     let rendered = render();
-    assert!(rendered.contains("`plex.terminate_session`"));
-    assert!(rendered.contains("destructive (elicited)"));
-    assert!(rendered.contains("`sonarr.get_series`"));
-    assert!(rendered.contains("read"));
+    assert!(rendered.contains("| `plex.terminate_session` | `POST` | destructive (elicited) |"));
+    assert!(rendered.contains("| `sonarr.get_series` | `GET` | read |"));
 }
