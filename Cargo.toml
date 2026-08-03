@@ -124,6 +124,7 @@ anyhow = "1"
 thiserror = "2"
 sha2 = "0.10"
 futures-util = "0.3"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
@@ -144,7 +145,6 @@ test-support = []
 
 [dev-dependencies]
 yarr = { path = ".", features = ["test-support"] }
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 rmcp = { workspace = true, features = [
   "client",

@@ -18,6 +18,21 @@ pub(super) enum ResponseMode {
     },
 }
 
+#[derive(Clone)]
+pub(super) struct RequestSummary {
+    method: String,
+    path: String,
+}
+
+impl RequestSummary {
+    pub(super) fn new(method: &reqwest::Method, url: &reqwest::Url) -> Self {
+        Self {
+            method: method.as_str().to_owned(),
+            path: url.path().to_owned(),
+        }
+    }
+}
+
 impl YarrClient {
     /// Send a request, retrying once for qBittorrent if the cached SID was
     /// rejected upstream.
@@ -31,8 +46,9 @@ impl YarrClient {
         &self,
         service: &ServiceConfig,
         request: reqwest::RequestBuilder,
+        summary: RequestSummary,
     ) -> Result<Value> {
-        self.finish_with_retry_mode(service, request, ResponseMode::JsonCompatible)
+        self.finish_with_retry_mode(service, request, summary, ResponseMode::JsonCompatible)
             .await
     }
 
@@ -40,11 +56,15 @@ impl YarrClient {
         &self,
         service: &ServiceConfig,
         request: reqwest::RequestBuilder,
+        summary: RequestSummary,
         mode: ResponseMode,
     ) -> Result<Value> {
         if service.kind == ServiceKind::Qbittorrent {
             match request.try_clone() {
-                Some(retry) => match self.finish(service, request, mode.clone()).await {
+                Some(retry) => match self
+                    .finish(service, request, summary.clone(), mode.clone())
+                    .await
+                {
                     Err(err) if is_auth_failure(&err) => {
                         let session = self.qbit_session(service)?;
                         session.invalidate().await;
@@ -56,7 +76,7 @@ impl YarrClient {
                         )
                         .increment(1);
                         relogin?;
-                        return self.finish(service, retry, mode).await;
+                        return self.finish(service, retry, summary, mode).await;
                     }
                     result => return result,
                 },
@@ -67,25 +87,17 @@ impl YarrClient {
                 ),
             }
         }
-        self.finish(service, request, mode).await
+        self.finish(service, request, summary, mode).await
     }
 
     async fn finish(
         &self,
         service: &ServiceConfig,
         request: reqwest::RequestBuilder,
+        summary: RequestSummary,
         mode: ResponseMode,
     ) -> Result<Value> {
-        let request_summary = request
-            .try_clone()
-            .and_then(|request| request.build().ok())
-            .map(|request| {
-                (
-                    request.method().as_str().to_owned(),
-                    request.url().path().to_owned(),
-                )
-            });
-        let mut metric = UpstreamCallMetric::new(service, request_summary);
+        let mut metric = UpstreamCallMetric::new(service, summary);
         let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
@@ -175,15 +187,14 @@ struct UpstreamCallMetric {
 }
 
 impl UpstreamCallMetric {
-    fn new(service: &ServiceConfig, request: Option<(String, String)>) -> Self {
-        let (method, path) = request.unwrap_or_else(|| ("<streaming>".into(), "<unknown>".into()));
+    fn new(service: &ServiceConfig, request: RequestSummary) -> Self {
         Self {
             service: service.name.clone(),
             kind: service.kind.as_str(),
-            method,
-            path,
+            method: request.method,
+            path: request.path,
             started: Instant::now(),
-            outcome: "internal_error",
+            outcome: "cancelled",
             completed: false,
         }
     }
@@ -200,7 +211,7 @@ impl Drop for UpstreamCallMetric {
         let outcome = if self.completed {
             self.outcome
         } else {
-            "internal_error"
+            "cancelled"
         };
         axum_prometheus::metrics::counter!(
             "yarr_upstream_requests_total",

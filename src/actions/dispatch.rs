@@ -12,8 +12,27 @@ use serde_json::Value;
 
 use super::help::help_text;
 use super::model::{ValidationError, YarrAction};
-use super::registry::{action_allowed_for_kind, curated_command, valid_actions_for_kind};
+use super::registry::{
+    action_allowed_for_kind, action_spec, curated_command, valid_actions_for_kind,
+};
 use crate::app::YarrService;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ActionImpact {
+    Read,
+    Mutating,
+    Destructive,
+}
+
+impl ActionImpact {
+    pub const fn mutates(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+
+    pub const fn uses_instance_timeout(self) -> bool {
+        matches!(self, Self::Read)
+    }
+}
 
 /// Validate that `action` (by name) may run against the service named `service_name`.
 ///
@@ -50,7 +69,7 @@ pub fn validate_action_for_service(
 
 /// The service name an action targets, if any. Infra actions that don't address
 /// a service (`help`) return `None`.
-fn target_service(action: &YarrAction) -> Option<&str> {
+pub fn target_service(action: &YarrAction) -> Option<&str> {
     match action {
         // Infra actions that don't address a single service: `help` and `codemode`
         // (the script reaches services per-call via the baked-in `<service>.<verb>`
@@ -77,12 +96,56 @@ fn target_service(action: &YarrAction) -> Option<&str> {
     }
 }
 
+pub fn action_impact(service: &YarrService, action: &YarrAction) -> Result<ActionImpact> {
+    let impact = match action {
+        YarrAction::ApiDelete { .. } => ActionImpact::Destructive,
+        YarrAction::ApiPost { .. } | YarrAction::ApiPut { .. } => ActionImpact::Mutating,
+        YarrAction::Op {
+            service: service_name,
+            op,
+            ..
+        } => {
+            let kind = service
+                .kind_of(service_name)?
+                .ok_or_else(|| anyhow::anyhow!("unknown service `{service_name}`"))?;
+            match crate::openapi::classify_operation(kind, op)
+                .ok_or_else(|| anyhow::anyhow!("unknown {} operation `{op}`", kind.as_str()))?
+            {
+                crate::openapi::OperationSafety::Read => ActionImpact::Read,
+                crate::openapi::OperationSafety::Mutating => ActionImpact::Mutating,
+                crate::openapi::OperationSafety::Destructive => ActionImpact::Destructive,
+            }
+        }
+        YarrAction::Curated { name, .. } => {
+            let descriptor = curated_command(name)
+                .ok_or_else(|| anyhow::anyhow!("curated command `{name}` is not registered"))?;
+            if descriptor.destructive {
+                ActionImpact::Destructive
+            } else if descriptor.mutates {
+                ActionImpact::Mutating
+            } else {
+                ActionImpact::Read
+            }
+        }
+        _ => action_spec(action.name()).map_or(ActionImpact::Read, |spec| {
+            if spec.destructive {
+                ActionImpact::Destructive
+            } else if spec.mutates {
+                ActionImpact::Mutating
+            } else {
+                ActionImpact::Read
+            }
+        }),
+    };
+    Ok(impact)
+}
+
 pub async fn execute_service_action(service: &YarrService, action: &YarrAction) -> Result<Value> {
     // Shared action×kind guard: runs for every action that targets a service,
     // on both the CLI and MCP paths. No-op for generic/infra actions.
     if let Some(service_name) = target_service(action) {
         validate_action_for_service(service, action.name(), service_name)?;
-        if action_mutates(service, action)? && service.is_read_only(service_name)? {
+        if action_impact(service, action)?.mutates() && service.is_read_only(service_name)? {
             anyhow::bail!(
                 "service `{service_name}` is read-only via YARR_FLEET_READONLY; mutating action `{}` was refused",
                 action.name()
@@ -150,24 +213,6 @@ pub async fn execute_service_action(service: &YarrService, action: &YarrAction) 
             (cmd.handler)(service, params).await
         }
     }
-}
-
-fn action_mutates(service: &YarrService, action: &YarrAction) -> Result<bool> {
-    Ok(match action {
-        YarrAction::ApiPost { .. } | YarrAction::ApiPut { .. } | YarrAction::ApiDelete { .. } => {
-            true
-        }
-        YarrAction::Op {
-            service: service_name,
-            op,
-            ..
-        } => service
-            .kind_of(service_name)?
-            .and_then(|kind| crate::openapi::classify_operation(kind, op))
-            .is_some_and(|safety| safety != crate::openapi::OperationSafety::Read),
-        YarrAction::Curated { name, .. } => curated_command(name).is_some_and(|cmd| cmd.mutates),
-        _ => false,
-    })
 }
 
 #[cfg(test)]

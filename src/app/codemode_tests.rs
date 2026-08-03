@@ -7,6 +7,27 @@
 
 use crate::testing::loopback_state;
 
+struct SlowAuthorizer;
+
+impl super::CodeModeCallGuard for SlowAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _action: &'a crate::actions::YarrAction,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok(())
+        })
+    }
+
+    fn authorize_fleet<'a>(
+        &'a self,
+        _authorization: &'a super::fleet::FleetAuthorization,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[path = "codemode_artifacts_tests.rs"]
 mod artifacts;
 #[path = "codemode_runtime_tests.rs"]
@@ -109,6 +130,53 @@ async fn codemode_allows_destructive_actions_to_dispatch() {
     assert!(!result.contains("destructive"), "got: {result}");
     assert!(!result.contains("cannot run"), "got: {result}");
     assert_eq!(out["calls"][0]["action"], "api_delete");
+}
+
+#[tokio::test]
+async fn mutation_never_starts_when_authorization_outlives_the_script_deadline() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/api/v3/test",
+        axum::routing::post(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({"ok": true}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = crate::config::YarrConfig {
+        services: vec![crate::config::ServiceConfig {
+            name: "sonarr".into(),
+            kind: crate::config::ServiceKind::Sonarr,
+            base_url: format!("http://{address}"),
+            api_key: Some("test".into()),
+            ..Default::default()
+        }],
+    };
+    let service =
+        crate::app::YarrService::new(crate::yarr::YarrClient::new(&config).unwrap(), config)
+            .with_codemode_limits(
+                1,
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_millis(50),
+            );
+
+    let _ = service
+        .codemode_with_guard(
+            r#"async () => callTool("api_post", {service:"sonarr", path:"/api/v3/test", body:{}})"#,
+            std::sync::Arc::new(SlowAuthorizer),
+        )
+        .await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.abort();
 }
 
 #[tokio::test]

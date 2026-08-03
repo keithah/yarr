@@ -105,7 +105,7 @@ impl YarrService {
     }
 
     pub async fn snippet_run(&self, name: &str, input: &Value) -> Result<Value> {
-        let result = self.snippet_run_inner(name, input, None).await;
+        let result = self.snippet_run_inner(name, input, None, None).await;
         record_snippet_operation("run", &result);
         result
     }
@@ -116,7 +116,19 @@ impl YarrService {
         input: &Value,
         guard: Option<std::sync::Arc<dyn CodeModeCallGuard>>,
     ) -> Result<Value> {
-        let result = self.snippet_run_inner(name, input, guard).await;
+        let result = self.snippet_run_inner(name, input, guard, None).await;
+        record_snippet_operation("run", &result);
+        result
+    }
+
+    pub(super) async fn snippet_run_with_guard_until(
+        &self,
+        name: &str,
+        input: &Value,
+        guard: Option<std::sync::Arc<dyn CodeModeCallGuard>>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Value> {
+        let result = self.snippet_run_inner(name, input, guard, deadline).await;
         record_snippet_operation("run", &result);
         result
     }
@@ -126,6 +138,7 @@ impl YarrService {
         name: &str,
         input: &Value,
         guard: Option<std::sync::Arc<dyn CodeModeCallGuard>>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Value> {
         let source = match builtin_source(name) {
             Some(source) => source.to_owned(),
@@ -138,7 +151,7 @@ impl YarrService {
         let input_json = serde_json::to_string(input).map_err(|error| {
             anyhow::anyhow!("snippet input is not serializable as JSON: {error}")
         })?;
-        Box::pin(self.run_script(&source, Some(input_json), true, guard)).await
+        Box::pin(self.run_script(&source, Some(input_json), true, guard, deadline)).await
     }
 
     pub async fn snippet_delete(&self, name: &str) -> Result<Value> {

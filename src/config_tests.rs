@@ -145,3 +145,57 @@ fn config_load_merges_fleet_file_with_environment_precedence() {
             .read_only
     );
 }
+
+#[test]
+fn config_load_does_not_resolve_a_secret_for_an_overridden_fleet_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let fleet_path = dir.path().join("fleet.yaml");
+    std::fs::write(
+        &fleet_path,
+        "services:\n  - name: plex_den\n    kind: plex\n    url: http://stale:32400\n    token_env: STALE_FLEET_TOKEN\n",
+    )
+    .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_HOME", dir.path());
+    env.set("HOME", dir.path());
+    env.remove("YARR_CONFIG");
+    env.remove("STALE_FLEET_TOKEN");
+    env.set("YARR_FLEET_FILE", &fleet_path);
+    env.set("YARR_SERVICES", "plex_den");
+    env.set("YARR_PLEX_DEN_KIND", "plex");
+    env.set("YARR_PLEX_DEN_URL", "http://current:32400");
+    env.set("YARR_PLEX_DEN_TOKEN", "current-secret");
+
+    let loaded = Config::load().unwrap();
+    let service = loaded.yarr.services.first().unwrap();
+    assert_eq!(service.name, "plex_den");
+    assert_eq!(service.base_url, "http://current:32400");
+    assert_eq!(service.token.as_deref(), Some("current-secret"));
+}
+
+#[test]
+fn fleet_merge_does_not_hide_duplicate_config_service_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let fleet_path = dir.path().join("fleet.yaml");
+    std::fs::write(
+        &config_path,
+        "[[yarr.services]]\nname='plex_den'\nkind='plex'\nbase_url='http://one'\n\n[[yarr.services]]\nname='PLEX_DEN'\nkind='plex'\nbase_url='http://two'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &fleet_path,
+        "services:\n  - name: plex_other\n    kind: plex\n    url: http://other\n",
+    )
+    .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_CONFIG", &config_path);
+    env.set("YARR_FLEET_FILE", &fleet_path);
+    env.remove("YARR_SERVICES");
+
+    let error = Config::load().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("duplicate configured service name"),
+        "{error:#}"
+    );
+}

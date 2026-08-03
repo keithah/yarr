@@ -5,6 +5,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -59,6 +60,18 @@ pub(crate) struct TautulliIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TautulliInspectionError {
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TautulliInspection {
+    identities: Vec<TautulliIdentity>,
+    errors: Vec<TautulliInspectionError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct FleetPairing {
     pub tautulli: String,
     pub plex: String,
@@ -69,6 +82,7 @@ pub(crate) struct PairingReport {
     pub paired: Vec<FleetPairing>,
     pub unpaired_plex: Vec<String>,
     pub unpaired_tautulli: Vec<String>,
+    pub inspection_errors: Vec<TautulliInspectionError>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -104,10 +118,15 @@ pub async fn run_plex_discovery(
         anyhow::bail!("discover plex: account token env {token_env} is empty");
     }
     validate_env_name(token_env)?;
-    let resources = fetch_resources(PLEX_RESOURCES_URL, &account_token).await?;
+    let (resources, inspection) = tokio::join!(
+        fetch_resources(PLEX_RESOURCES_URL, &account_token),
+        inspect_tautulli(config)
+    );
+    let resources = resources?;
     let discovered = discover_resources(resources, owned_only)?;
-    let tautulli = inspect_tautulli(config).await;
-    let pairing = pair_tautulli(&discovered, &tautulli)?;
+    let tautulli = inspection.identities;
+    let mut pairing = pair_tautulli(&discovered, &tautulli)?;
+    pairing.inspection_errors = inspection.errors;
 
     if diff {
         let previous = read_discovered_fleet(output)?;
@@ -123,6 +142,7 @@ pub async fn run_plex_discovery(
         ));
     }
 
+    recover_orphan_env(output, env_output)?;
     if output.exists() || env_output.exists() {
         anyhow::bail!(
             "discover plex refuses to overwrite reviewable fleet files; {} or {} already exists (use --diff)",
@@ -154,7 +174,7 @@ async fn fetch_resources(endpoint: &str, token: &str) -> Result<Vec<PlexResource
         .connect_timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client
+    let mut response = client
         .get(endpoint)
         .header(reqwest::header::ACCEPT, "application/json")
         .header("X-Plex-Token", token)
@@ -173,9 +193,17 @@ async fn fetch_resources(endpoint: &str, token: &str) -> Result<Vec<PlexResource
     {
         anyhow::bail!("discover plex: plex.tv resource response exceeds 4 MiB");
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > MAX_DISCOVERY_RESPONSE_BYTES {
-        anyhow::bail!("discover plex: plex.tv resource response exceeds 4 MiB");
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or(0)
+            .min(MAX_DISCOVERY_RESPONSE_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_DISCOVERY_RESPONSE_BYTES {
+            anyhow::bail!("discover plex: plex.tv resource response exceeds 4 MiB");
+        }
+        bytes.extend_from_slice(&chunk);
     }
     parse_resources(&bytes).context("discover plex: unexpected plex.tv resource response shape")
 }
@@ -278,6 +306,7 @@ pub(crate) fn pair_tautulli(
         paired,
         unpaired_plex,
         unpaired_tautulli,
+        inspection_errors: Vec::new(),
     })
 }
 
@@ -369,48 +398,87 @@ fn is_relay(connection: &PlexConnection) -> bool {
     connection.relay || connection.uri.contains("relay.plex.direct")
 }
 
-async fn inspect_tautulli(config: &YarrConfig) -> Vec<TautulliIdentity> {
+async fn inspect_tautulli(config: &YarrConfig) -> TautulliInspection {
     let client = match YarrClient::new(config) {
         Ok(client) => client,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            return TautulliInspection {
+                errors: config
+                    .services
+                    .iter()
+                    .filter(|instance| instance.kind == ServiceKind::Tautulli)
+                    .map(|instance| TautulliInspectionError {
+                        name: instance.name.clone(),
+                        error: error.to_string(),
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+        }
     };
     let service = YarrService::new(client, config.clone());
-    let mut identities = Vec::new();
-    for instance in config
+    let probes = config
         .services
         .iter()
         .filter(|instance| instance.kind == ServiceKind::Tautulli)
-    {
-        let pms_identifier = match service.service_status(&instance.name).await {
-            Ok(value) => find_string_field(&value, "pms_identifier"),
-            Err(_) => None,
-        };
-        identities.push(TautulliIdentity {
-            name: instance.name.clone(),
-            url: instance.base_url.clone(),
-            pms_identifier,
+        .cloned()
+        .map(|instance| {
+            let service = service.clone();
+            async move {
+                match tokio::time::timeout(
+                    crate::codemode::FLEET_INSTANCE_TIMEOUT,
+                    service.service_status(&instance.name),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => Ok(TautulliIdentity {
+                        name: instance.name,
+                        url: instance.base_url,
+                        pms_identifier: tautulli_pms_identifier(&value),
+                    }),
+                    Ok(Err(error)) => Err(TautulliInspectionError {
+                        name: instance.name,
+                        error: error.to_string(),
+                    }),
+                    Err(_) => Err(TautulliInspectionError {
+                        name: instance.name,
+                        error: format!(
+                            "probe timed out after {} seconds",
+                            crate::codemode::FLEET_INSTANCE_TIMEOUT.as_secs()
+                        ),
+                    }),
+                }
+            }
         });
+    let results = stream::iter(probes)
+        .buffer_unordered(crate::codemode::FLEET_MAX_CONCURRENT)
+        .collect::<Vec<_>>()
+        .await;
+    let mut inspection = TautulliInspection::default();
+    for result in results {
+        match result {
+            Ok(identity) => inspection.identities.push(identity),
+            Err(error) => inspection.errors.push(error),
+        }
     }
-    identities.sort_by(|left, right| left.name.cmp(&right.name));
-    identities
+    inspection
+        .identities
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    inspection
+        .errors
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    inspection
 }
 
-fn find_string_field(value: &serde_json::Value, field: &str) -> Option<String> {
-    match value {
-        serde_json::Value::Object(object) => object
-            .get(field)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                object
-                    .values()
-                    .find_map(|child| find_string_field(child, field))
-            }),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find_map(|child| find_string_field(child, field)),
-        _ => None,
-    }
+fn tautulli_pms_identifier(value: &serde_json::Value) -> Option<String> {
+    [
+        "/response/data/pms_identifier",
+        "/response/data/server/pms_identifier",
+        "/pms_identifier",
+    ]
+    .into_iter()
+    .find_map(|path| value.pointer(path).and_then(serde_json::Value::as_str))
+    .map(str::to_owned)
 }
 
 #[derive(Serialize)]
@@ -485,7 +553,6 @@ fn write_discovery_files(
     }));
     services.sort_by(|left, right| left.name.cmp(&right.name));
     let yaml = serde_yaml::to_string(&FleetDocumentOut { services })?;
-    create_new_file(output, yaml.as_bytes(), false)?;
 
     let mut env =
         String::from("# Generated by yarr discover plex; contains per-server credentials.\n");
@@ -498,26 +565,101 @@ fn write_discovery_files(
         env.push_str(&server.access_token);
         env.push('\n');
     }
-    if let Err(error) = create_new_file(env_output, env.as_bytes(), true) {
-        let _ = std::fs::remove_file(output);
-        return Err(error);
-    }
+    commit_discovery_files(output, yaml.as_bytes(), env_output, env.as_bytes())?;
     Ok(())
 }
 
-fn create_new_file(path: &Path, contents: &[u8], private: bool) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+fn stage_file(path: &Path, contents: &[u8], private: bool) -> Result<tempfile::NamedTempFile> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::Builder::new()
+        .prefix(".yarr-discovery-")
+        .tempfile_in(parent)
+        .with_context(|| format!("could not stage {}", path.display()))?;
     #[cfg(unix)]
     if private {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("refusing to overwrite {}", path.display()))?;
     file.write_all(contents)?;
-    file.sync_all()?;
+    file.as_file().sync_all()?;
+    Ok(file)
+}
+
+fn commit_discovery_files(output: &Path, yaml: &[u8], env_output: &Path, env: &[u8]) -> Result<()> {
+    if output.exists() || env_output.exists() {
+        anyhow::bail!(
+            "refusing to overwrite {}",
+            if output.exists() {
+                output.display()
+            } else {
+                env_output.display()
+            }
+        );
+    }
+    let fleet_stage = stage_file(output, yaml, false)?;
+    let env_stage = stage_file(env_output, env, true)?;
+    env_stage.persist_noclobber(env_output).map_err(|error| {
+        anyhow::anyhow!(
+            "could not commit credential file {}: {}",
+            env_output.display(),
+            error.error
+        )
+    })?;
+    sync_parent(env_output)?;
+    if let Err(error) = fleet_stage.persist_noclobber(output) {
+        let rollback = std::fs::remove_file(env_output);
+        if let Err(rollback_error) = rollback {
+            anyhow::bail!(
+                "could not commit {}: {}; rollback of {} also failed: {}",
+                output.display(),
+                error.error,
+                env_output.display(),
+                rollback_error
+            );
+        }
+        return Err(anyhow::anyhow!(
+            "could not commit {}: {}",
+            output.display(),
+            error.error
+        ));
+    }
+    sync_parent(output)?;
+    Ok(())
+}
+
+fn recover_orphan_env(output: &Path, env_output: &Path) -> Result<()> {
+    if output.exists() || !env_output.exists() {
+        return Ok(());
+    }
+    let contents = std::fs::read_to_string(env_output)
+        .with_context(|| format!("could not inspect {}", env_output.display()))?;
+    if !contents.starts_with("# Generated by yarr discover plex;") {
+        return Ok(());
+    }
+    tracing::warn!(
+        path = %env_output.display(),
+        "removing orphaned discovery credential file left before fleet commit"
+    );
+    std::fs::remove_file(env_output)
+        .with_context(|| format!("could not remove orphaned {}", env_output.display()))?;
+    sync_parent(env_output)
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("could not sync directory {}", parent.display()))?;
+    }
     Ok(())
 }
 

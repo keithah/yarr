@@ -38,7 +38,8 @@ use services::{
 
 #[cfg(test)]
 pub(crate) use fleet_file::FleetFormat;
-pub(crate) use fleet_file::{load_fleet_file, merge_service_sources};
+#[cfg(test)]
+pub(crate) use fleet_file::merge_service_sources;
 
 #[cfg(test)]
 #[path = "config/fleet_file_tests.rs"]
@@ -96,11 +97,7 @@ impl Config {
 
         let _overlay = EnvOverlayGuard::install(load_env_overlay()?);
 
-        if let Some(path) = env_value("YARR_FLEET_FILE").filter(|path| !path.is_empty()) {
-            let fleet_services = load_fleet_file(std::path::Path::new(&path))?;
-            config.yarr.services =
-                merge_service_sources(fleet_services, std::mem::take(&mut config.yarr.services))?;
-        }
+        let fleet_path = env_value("YARR_FLEET_FILE").filter(|path| !path.is_empty());
 
         // Env overrides — YARR_MCP_* for server config.
         env_str("YARR_MCP_HOST", &mut config.mcp.host);
@@ -216,6 +213,12 @@ impl Config {
         }
 
         load_services_from_env(&mut config.yarr)?;
+        if let Some(path) = fleet_path {
+            config.yarr.services = fleet_file::load_fleet_file_with_overrides(
+                std::path::Path::new(&path),
+                std::mem::take(&mut config.yarr.services),
+            )?;
+        }
         if let Some(readonly) = env_value("YARR_FLEET_READONLY") {
             apply_readonly_services(&mut config.yarr.services, &readonly)?;
         }

@@ -48,7 +48,7 @@ fn destructive_target_cap_fails_closed_before_prompting() {
 #[test]
 fn normalize_accept_with_confirm_true_is_confirmed() {
     assert_eq!(
-        normalize(Ok(Some(DeleteConfirmation { confirm: true }))),
+        normalize(Ok(Some(DestructiveConfirmation { confirm: true }))),
         ElicitOutcome::Confirmed
     );
 }
@@ -56,7 +56,7 @@ fn normalize_accept_with_confirm_true_is_confirmed() {
 #[test]
 fn normalize_accept_with_confirm_false_refuses() {
     assert_eq!(
-        normalize(Ok(Some(DeleteConfirmation { confirm: false }))),
+        normalize(Ok(Some(DestructiveConfirmation { confirm: false }))),
         ElicitOutcome::Refused
     );
 }
@@ -66,19 +66,22 @@ fn normalize_empty_content_refuses() {
     assert_eq!(normalize(Ok(None)), ElicitOutcome::Refused);
 }
 
-// ── classify: ElicitOutcome → DeleteGate (the gate decision, fully covered) ──────
+// ── classify: ElicitOutcome → DestructiveGate (fully covered) ───────────────────
 
 #[test]
 fn classify_confirmed_proceeds() {
-    assert_eq!(classify(ElicitOutcome::Confirmed), DeleteGate::Proceed);
+    assert_eq!(classify(ElicitOutcome::Confirmed), DestructiveGate::Proceed);
 }
 
 #[test]
 fn classify_refused_declines() {
-    assert_eq!(classify(ElicitOutcome::Refused), DeleteGate::Declined);
+    assert_eq!(classify(ElicitOutcome::Refused), DestructiveGate::Declined);
 }
 
 #[test]
 fn classify_unsupported_declines() {
-    assert_eq!(classify(ElicitOutcome::Unsupported), DeleteGate::Declined);
+    assert_eq!(
+        classify(ElicitOutcome::Unsupported),
+        DestructiveGate::Declined
+    );
 }

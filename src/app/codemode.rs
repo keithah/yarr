@@ -16,6 +16,7 @@ use std::time::Instant;
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument as _;
 
 use crate::actions::YarrAction;
 use crate::app::YarrService;
@@ -36,7 +37,7 @@ mod artifacts;
 #[path = "codemode_dispatch.rs"]
 mod dispatch;
 #[path = "codemode_fleet.rs"]
-mod fleet;
+pub(crate) mod fleet;
 #[path = "codemode_runtime.rs"]
 mod runtime;
 #[path = "codemode_snippets.rs"]
@@ -63,7 +64,7 @@ pub(crate) trait CodeModeCallGuard: Send + Sync {
 
     fn authorize_fleet<'a>(
         &'a self,
-        request: &'a FleetMapRequest,
+        authorization: &'a fleet::FleetAuthorization,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
@@ -76,7 +77,7 @@ impl YarrService {
     /// `result` is the script's return value, `calls` is the per-call audit log
     /// (`{action, ok, error}`), and `logs` is captured `console.*` output.
     pub async fn codemode(&self, code: &str) -> Result<Value> {
-        self.run_script(code, None, false, None).await
+        self.run_script(code, None, false, None, None).await
     }
 
     pub(crate) async fn codemode_with_guard(
@@ -84,7 +85,7 @@ impl YarrService {
         code: &str,
         guard: std::sync::Arc<dyn CodeModeCallGuard>,
     ) -> Result<Value> {
-        self.run_script(code, None, false, Some(guard)).await
+        self.run_script(code, None, false, Some(guard), None).await
     }
 
     /// Shared executor for a Code Mode script. `input_json` binds `globalThis.input`
@@ -97,6 +98,7 @@ impl YarrService {
         input_json: Option<String>,
         in_snippet: bool,
         guard: Option<std::sync::Arc<dyn CodeModeCallGuard>>,
+        inherited_deadline: Option<tokio::time::Instant>,
     ) -> Result<Value> {
         if code.trim().is_empty() {
             anyhow::bail!("codemode requires a non-empty `code` string");
@@ -124,25 +126,30 @@ impl YarrService {
         let (req_tx, mut req_rx) = mpsc::channel::<ToolRequest>(8);
         let (art_tx, mut art_rx) = mpsc::channel::<ArtifactRequest>(8);
         let (embed_tx, mut embed_rx) = mpsc::channel::<EmbedRequest>(8);
-        let tokio_deadline = tokio::time::Instant::now() + self.codemode_execution_timeout;
+        let local_deadline = tokio::time::Instant::now() + self.codemode_execution_timeout;
+        let tokio_deadline =
+            inherited_deadline.map_or(local_deadline, |parent| parent.min(local_deadline));
+        let remaining = tokio_deadline.saturating_duration_since(tokio::time::Instant::now());
         let limits = EngineLimits {
             memory_bytes: CODEMODE_MEMORY_LIMIT,
             stack_bytes: CODEMODE_STACK_LIMIT,
-            deadline: Instant::now() + self.codemode_execution_timeout,
+            deadline: Instant::now() + remaining,
         };
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = CODEMODE_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+        let run_id = format!("{nanos}-{}-{seq}", std::process::id());
+        let run_span = tracing::info_span!("codemode_run", codemode_run_id = %run_id);
 
         // Per-run artifacts dir, computed host-side (the engine never reads a clock).
         // `None` when no artifacts root is configured → `writeArtifact` errors.
         let run = self.data_dir().map(|root| {
             prune_artifact_runs(root);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let seq = CODEMODE_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
-            let run_id = format!("{nanos}-{}-{seq}", std::process::id());
             let dir = root.join(CODEMODE_ARTIFACTS_SUBDIR).join(&run_id);
-            (run_id, dir)
+            (run_id.clone(), dir)
         });
 
         // The engine runs on a blocking thread; `on_call`/`on_write` block it on a
@@ -220,17 +227,58 @@ impl YarrService {
                 maybe = req_rx.recv(), if !req_done => match maybe {
                     Some(req) => {
                         let started = Instant::now();
-                        let outcome = tokio::time::timeout_at(
-                            tokio_deadline,
-                            self.codemode_dispatch(
-                                &req.id,
-                                &req.params_json,
-                                in_snippet,
-                                guard.clone(),
-                            ),
-                        )
-                        .await
-                        .unwrap_or_else(|_| Err("codemode absolute deadline exceeded".to_string()));
+                        let call_span = tracing::info_span!(parent: &run_span, "codemode_call", action = %req.id);
+                        let outcome = match self.prepare_codemode_dispatch(
+                            &req.id,
+                            &req.params_json,
+                            in_snippet,
+                        ) {
+                            Err(error) => Err(error),
+                            Ok(prepared) => {
+                                let impact = prepared.impact();
+                                let authorization = tokio::time::timeout_at(
+                                    tokio_deadline,
+                                    self.authorize_prepared_codemode(&prepared, guard.as_ref())
+                                        .instrument(call_span.clone()),
+                                )
+                                .await
+                                .unwrap_or_else(|_| Err(
+                                    "codemode deadline expired during authorization; nothing changed"
+                                        .to_string(),
+                                ));
+                                match authorization {
+                                    Err(error) => Err(error),
+                                    Ok(()) if tokio::time::Instant::now() >= tokio_deadline => Err(
+                                        "codemode deadline expired before action dispatch; nothing changed"
+                                            .to_string(),
+                                    ),
+                                    Ok(()) if impact.uses_instance_timeout() => {
+                                        tokio::time::timeout_at(
+                                            tokio_deadline,
+                                            self.execute_authorized_codemode(
+                                                prepared,
+                                                guard.clone(),
+                                                Some(tokio_deadline),
+                                            )
+                                                .instrument(call_span),
+                                        )
+                                        .await
+                                        .unwrap_or_else(|_| Err(
+                                            "codemode absolute deadline exceeded".to_string(),
+                                        ))
+                                    }
+                                    Ok(()) => {
+                                        self.execute_authorized_codemode(
+                                            prepared,
+                                            guard.clone(),
+                                            Some(tokio_deadline),
+                                        )
+                                            .instrument(call_span)
+                                            .await
+                                    }
+                                }
+                            }
+                        };
                         let elapsed_ms = started.elapsed().as_millis();
                         let ok = outcome.is_ok();
                         let error = outcome.as_ref().err().cloned();
@@ -334,6 +382,7 @@ impl YarrService {
             "calls": calls,
             "logs": outcome.logs,
             "artifacts": artifacts,
+            "runId": run_id,
         });
         if let Some((run_id, _)) = run {
             response["artifactsRunId"] = Value::String(run_id);

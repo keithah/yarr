@@ -169,3 +169,34 @@ fn fleet_array_summary_reports_item_count() {
     assert_eq!(env["result"][0]["truncated"], true);
     assert_eq!(env["result"][0]["summary"]["item_count"], 2_000);
 }
+
+#[test]
+fn artifact_receipts_are_trimmed_without_triggering_transport_truncation() {
+    let artifacts = (0..64)
+        .map(|index| {
+            json!({
+                "path": format!("{index:02}-{}.json", "x".repeat(1024)),
+                "ok": true,
+                "error": null,
+                "delivered": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut env = json!({
+        "result": {"ok": true},
+        "calls": [],
+        "logs": [],
+        "artifacts": artifacts,
+    });
+    assert!(serialized_len(&env) > RESPONSE_BUDGET);
+
+    fit_response(&mut env);
+
+    assert!(serialized_len(&env) <= RESPONSE_BUDGET);
+    assert_eq!(env["result"], json!({"ok": true}));
+    assert!(
+        env["artifacts"][0]["truncated_artifacts"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+}

@@ -7,7 +7,7 @@ use rmcp::{RoleServer, service::Peer};
 use serde_json::{Map, Value};
 
 use crate::actions::{YarrAction, execute_service_action, required_scope_for_action};
-use crate::app::codemode::{CodeModeCallGuard, FleetMapRequest};
+use crate::app::codemode::CodeModeCallGuard;
 use crate::server::AppState;
 
 use super::schemas::YARR_TOOL_NAME;
@@ -124,10 +124,12 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                 ));
             }
 
-            let (destructive, service_name) = destructive_inner_call(&self.state, action);
-            if !destructive {
+            let impact = crate::actions::action_impact(&self.state.service, action)
+                .map_err(|error| error.to_string())?;
+            if impact != crate::actions::ActionImpact::Destructive {
                 return Ok(());
             }
+            let service_name = crate::actions::target_service(action).unwrap_or(YARR_TOOL_NAME);
             if self.peer.supported_elicitation_modes().is_empty() {
                 return Err(format!(
                     "destructive inner Code Mode action `{}` requires an elicitation-capable MCP client; nothing changed",
@@ -141,7 +143,7 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                 self.state.config.destructive_fanout_max,
             )
             .await
-                == super::elicit::DeleteGate::Declined
+                == super::elicit::DestructiveGate::Declined
             {
                 return Err(format!(
                     "destructive inner Code Mode action `{}` was not confirmed; nothing changed",
@@ -154,14 +156,9 @@ impl CodeModeCallGuard for McpCodeModeGuard {
 
     fn authorize_fleet<'a>(
         &'a self,
-        request: &'a FleetMapRequest,
+        authorization: &'a crate::app::codemode::fleet::FleetAuthorization,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let authorization = self
-                .state
-                .service
-                .fleet_authorization(request)
-                .map_err(|error| error.to_string())?;
             if let (Some(auth), Some(required)) = (
                 self.auth.as_ref(),
                 required_scope_for_action(authorization.scope_action),
@@ -172,7 +169,9 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                     authorization.action
                 ));
             }
-            if !authorization.destructive || authorization.targets.is_empty() {
+            if authorization.impact != crate::actions::ActionImpact::Destructive
+                || authorization.targets.is_empty()
+            {
                 return Ok(());
             }
             let targets = super::elicit::validate_destructive_targets(
@@ -192,7 +191,7 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                 self.state.config.destructive_fanout_max,
             )
             .await
-                == super::elicit::DeleteGate::Declined
+                == super::elicit::DestructiveGate::Declined
             {
                 return Err(format!(
                     "destructive fleet action `{}` was not confirmed; nothing changed",
@@ -202,38 +201,6 @@ impl CodeModeCallGuard for McpCodeModeGuard {
             Ok(())
         })
     }
-}
-
-fn destructive_inner_call<'a>(state: &AppState, action: &'a YarrAction) -> (bool, &'a str) {
-    let service = match action {
-        YarrAction::ServiceStatus { service }
-        | YarrAction::ApiGet { service, .. }
-        | YarrAction::ApiPost { service, .. }
-        | YarrAction::ApiPut { service, .. }
-        | YarrAction::ApiDelete { service, .. }
-        | YarrAction::Op { service, .. } => service.as_str(),
-        YarrAction::Curated { params, .. } => params
-            .get("service")
-            .and_then(Value::as_str)
-            .unwrap_or(YARR_TOOL_NAME),
-        _ => YARR_TOOL_NAME,
-    };
-    let generated_destructive = match action {
-        YarrAction::Op { service, op, .. } => {
-            state
-                .service
-                .kind_of(service)
-                .ok()
-                .flatten()
-                .and_then(|kind| crate::openapi::classify_operation(kind, op))
-                == Some(crate::openapi::OperationSafety::Destructive)
-        }
-        _ => false,
-    };
-    (
-        crate::actions::action_is_destructive(action.name()) || generated_destructive,
-        service,
-    )
 }
 
 async fn dispatch_service_tool(

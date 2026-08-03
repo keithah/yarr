@@ -23,7 +23,7 @@ pub mod registry;
 
 // ── re-exports: stable `crate::actions::` surface ───────────────────────────────
 
-pub use dispatch::execute_service_action;
+pub use dispatch::{ActionImpact, action_impact, execute_service_action, target_service};
 pub use help::rest_help;
 #[cfg(test)]
 pub use model::DENY_SCOPE;

@@ -24,10 +24,10 @@ Configuration can come from `config.toml`, environment variables, or `.env` file
 | `YARR_MCP_TOOL_MODE` | `codemode` | `codemode` (one `yarr` tool; the fleet is reached inside a Code Mode script) or `flat` (one action-dispatched tool per configured service, no Code Mode layer; useful behind gateways that already provide dynamic discovery/Code Mode) |
 | `YARR_MCP_CODEMODE_MAX_CONCURRENT` | `4` | Maximum concurrently executing Code Mode runtimes (whole scripts, not requests within one script); must be at least 1 |
 | `YARR_MCP_CODEMODE_QUEUE_TIMEOUT_MS` | `500` | Maximum admission-queue wait before failing busy; must be non-zero |
-| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `120` | Execution deadline for one Code Mode run; fleet fanout must fit inside it; must be non-zero |
+| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `120` | Execution and mutation-admission deadline for one Code Mode run; already-dispatched writes drain to a receipt instead of being cancelled; must be non-zero |
 | `YARR_MCP_DESTRUCTIVE_FANOUT_MAX` | `3` | Maximum instances in one destructive fleet dispatch; must be at least 1 |
 | `YARR_FLEET_MAX_CONCURRENT` | `8` | Maximum upstream calls running concurrently inside one `fleet.map`; must be at least 1 |
-| `YARR_FLEET_INSTANCE_TIMEOUT_SECS` | `8` | Independent deadline for each instance in a fleet operation; must be at least 1 |
+| `YARR_FLEET_INSTANCE_TIMEOUT_SECS` | `8` | Independent deadline for each read-only fleet request; writes drain once dispatched and report `confirmed` or `indeterminate`; must be at least 1 |
 | `YARR_FLEET_READONLY` | unset | Comma-separated configured service names that reject every mutation on CLI and MCP |
 
 ### Fleet runtime sizing
@@ -35,7 +35,11 @@ Configuration can come from `config.toml`, environment variables, or `.env` file
 `YARR_MCP_CODEMODE_MAX_CONCURRENT` limits whole QuickJS runtimes admitted by the
 server; it does not throttle calls made inside one script. Fleet fanout has its
 own bounded concurrency and per-instance timeout (see Fleet Code Mode below),
-and every wave must finish inside `YARR_MCP_CODEMODE_TIMEOUT_SECS`.
+and read waves must finish inside `YARR_MCP_CODEMODE_TIMEOUT_SECS`. Mutating
+fanout stops admitting queued targets at that deadline, marks them
+`not_dispatched`, and drains only the requests already sent upstream so their
+receipts can say `confirmed` or `indeterminate` instead of falsely reporting a
+timeout as no change.
 
 The shared HTTP client maintains a pool per upstream host (up to eight idle
 connections per host), so a slow Plex server does not consume a global

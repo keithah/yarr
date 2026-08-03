@@ -62,10 +62,10 @@ access, ambiguity errors, and reserved globals.
 | `YARR_MCP_TOOL_MODE` | `codemode` | `codemode` or `flat`. See [CONFIG.md](CONFIG.md) for the tradeoff. |
 | `YARR_MCP_CODEMODE_MAX_CONCURRENT` | `4` | Maximum active Code Mode runtimes. |
 | `YARR_MCP_CODEMODE_QUEUE_TIMEOUT_MS` | `500` | Admission wait in milliseconds before returning busy. |
-| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `120` | Per-run Code Mode execution deadline, including all fleet fanout waves. |
+| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `120` | Per-run execution and mutation-admission deadline. Already-dispatched writes drain to a receipt; queued writes become `not_dispatched`. |
 | `YARR_MCP_DESTRUCTIVE_FANOUT_MAX` | `3` | Hard maximum instance count for one destructive fleet call. Larger calls fail closed and must be targeted in smaller groups. |
 | `YARR_FLEET_MAX_CONCURRENT` | `8` | Bounded concurrency for one host-backed `fleet.map`. |
-| `YARR_FLEET_INSTANCE_TIMEOUT_SECS` | `8` | Per-instance fleet deadline; one timeout becomes that instance's `ok:false` result. |
+| `YARR_FLEET_INSTANCE_TIMEOUT_SECS` | `8` | Per-instance read deadline; one timeout becomes `ok:false`. Writes are not cancelled after dispatch and report `confirmed`, `indeterminate`, or `not_dispatched`. |
 
 ## OAuth mode
 

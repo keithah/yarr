@@ -138,6 +138,113 @@ async fn per_instance_timeout_is_reported_without_rejecting_map() {
 }
 
 #[test]
+fn fleet_rows_are_bounded_before_the_quickjs_bridge() {
+    let mut row = serde_json::json!({
+        "name": "plex_den",
+        "ok": true,
+        "value": { "items": ["x".repeat(128 * 1024)] },
+        "truncated": false,
+        "elapsed_ms": 1,
+    });
+
+    crate::codemode::truncate::truncate_fleet_row(&mut row, 2048);
+
+    assert_eq!(row["truncated"], true);
+    assert!(row["value"].is_null());
+    assert!(row["summary"]["original_bytes"].as_u64().unwrap() > 100_000);
+    assert!(serde_json::to_vec(&row).unwrap().len() <= 2048);
+}
+
+#[tokio::test]
+async fn mutating_fanout_is_not_cancelled_by_the_read_timeout() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(|| async {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        axum::Json(serde_json::json!({"status": true}))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "sab_slow".into(),
+            kind: ServiceKind::Sabnzbd,
+            base_url: format!("http://{address}"),
+            api_key: Some("test".into()),
+            ..Default::default()
+        }],
+    };
+    let service = YarrService::new(YarrClient::new(&config).unwrap(), config)
+        .with_fleet_limits(1, std::time::Duration::from_millis(50));
+    let request = FleetMapRequest {
+        kind: "sabnzbd".into(),
+        method: "download_add".into(),
+        args: serde_json::json!({"url": "https://example.invalid/item.nzb"}),
+    };
+
+    let started = std::time::Instant::now();
+    let result = service.fleet_map(&request).await.unwrap();
+    assert_eq!(result[0]["ok"], true, "{result}");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(125));
+    server.abort();
+}
+
+#[tokio::test]
+async fn mutation_fanout_stops_admitting_targets_after_the_script_deadline() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(move || {
+        let observed = observed.clone();
+        async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            axum::Json(serde_json::json!({"status": true}))
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = YarrConfig {
+        services: (0..4)
+            .map(|index| ServiceConfig {
+                name: format!("sab_{index}"),
+                kind: ServiceKind::Sabnzbd,
+                base_url: format!("http://{address}"),
+                api_key: Some("test".into()),
+                ..Default::default()
+            })
+            .collect(),
+    };
+    let service = YarrService::new(YarrClient::new(&config).unwrap(), config)
+        .with_fleet_limits(1, std::time::Duration::from_millis(20));
+    let request = FleetMapRequest {
+        kind: "sabnzbd".into(),
+        method: "download_add".into(),
+        args: serde_json::json!({"url": "https://example.invalid/item.nzb"}),
+    };
+    let prepared = service.prepare_fleet(&request).unwrap();
+
+    let result = service
+        .execute_prepared_fleet(
+            prepared,
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100)),
+        )
+        .await
+        .unwrap();
+
+    assert!(calls.load(Ordering::SeqCst) < 4, "{result}");
+    assert!(
+        result
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["outcome"] == "not_dispatched")
+    );
+    server.abort();
+}
+
+#[test]
 fn destructive_generated_fanout_exposes_all_targets_to_the_guard() {
     let request = FleetMapRequest {
         kind: "plex".into(),
@@ -145,7 +252,10 @@ fn destructive_generated_fanout_exposes_all_targets_to_the_guard() {
         args: serde_json::json!({"sessionId": "x", "reason": "test"}),
     };
     let authorization = fleet_service().fleet_authorization(&request).unwrap();
-    assert!(authorization.destructive);
+    assert_eq!(
+        authorization.impact,
+        crate::actions::ActionImpact::Destructive
+    );
     assert_eq!(authorization.action, "terminate_session");
     assert_eq!(authorization.targets, vec!["plex_a", "plex_z"]);
 }

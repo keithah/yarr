@@ -8,11 +8,11 @@
 //! transport cap, so the agent always receives parseable JSON:
 //!
 //! Sacrifice order is value-ordered — preserve `result` (the answer), then the
-//! `calls` audit, then `logs` (debug output):
+//! `calls` audit, then artifact receipts, then `logs` (debug output):
 //!
 //! 1. If the serialized envelope already fits the budget → leave it untouched.
-//! 2. Otherwise set `logs` aside entirely (measure `result`/`calls`/`artifacts` on
-//!    their own) — the script's answer is more valuable than its debug output.
+//! 2. Otherwise set artifact receipts and `logs` aside — the script's answer is
+//!    more valuable than its auxiliary output.
 //!    (yarr diverges from lab here, which caps the result first.)
 //! 3. If that non-log payload is itself still over budget, replace an oversized
 //!    `result` with a structured, parseable
@@ -21,8 +21,8 @@
 //!    `{truncated, reason, partial}` (both lead with `truncated: true` so an agent
 //!    can branch programmatically), but a distinct shape — then, if STILL over,
 //!    trim the `calls` audit newest-first with a `{truncated_calls: N}` sentinel.
-//! 4. Finally, fit back as many of the newest `logs` lines as the remaining budget
-//!    allows (prepending a `[logs truncated …]` sentinel when some are dropped).
+//! 4. Fit back newest artifact receipts, then as many of the newest `logs` lines
+//!    as the remaining budget allows, each with an explicit truncation sentinel.
 //!
 //! The budget is *derived from* `MAX_RESPONSE_BYTES` (3/5 of it ≈ 24 KB, the same
 //! figure lab and Cloudflare's codemode use) so the two caps can never invert and
@@ -37,7 +37,8 @@ use crate::token_limit::MAX_RESPONSE_BYTES;
 /// Byte budget for the shaped Code Mode envelope. 3/5 of the transport cap leaves
 /// generous headroom (~16 KB at the default 40 KB cap) so re-serialization /
 /// escape growth can never push the shaped envelope past the transport truncation.
-const RESPONSE_BUDGET: usize = MAX_RESPONSE_BYTES / 5 * 3;
+pub(crate) const RESPONSE_BUDGET: usize = MAX_RESPONSE_BYTES / 5 * 3;
+pub(crate) const FLEET_RESULT_BUDGET: usize = RESPONSE_BUDGET - 2 * 1024;
 
 // The whole point is to shape the envelope BELOW the transport cap; pin that
 // invariant at compile time so a future change to either constant can't invert it.
@@ -66,8 +67,9 @@ pub fn fit_response(response: &mut Value) {
         return;
     }
 
-    // Pull logs out so we can measure the rest of the envelope on its own.
+    // Pull lowest-value metadata out so result and call receipts are budgeted first.
     let logs = take_array(response, "logs");
+    let artifacts = take_array(response, "artifacts");
 
     if !within_budget(response) {
         // The non-log payload (result/calls/artifacts) is itself over budget, so
@@ -89,12 +91,27 @@ pub fn fit_response(response: &mut Value) {
         );
     }
 
+    fit_newest(
+        response,
+        "artifacts",
+        artifacts,
+        |dropped| json!({ "truncated_artifacts": dropped }),
+    );
+
     // Finally, fit back as many of the NEWEST log lines as the remaining budget allows.
     fit_newest(response, "logs", logs, |dropped| {
         Value::String(format!(
             "[logs truncated to fit response budget — {dropped} line(s) dropped]"
         ))
     });
+    if !within_budget(response) {
+        let original_bytes = serialized_len(response);
+        *response = json!({
+            "truncated": true,
+            "original_bytes": original_bytes,
+            "reason": "Code Mode response metadata exceeded the response budget",
+        });
+    }
 }
 
 /// Preserve the shape and completeness signal of a `fleet.map` result. Each
@@ -115,64 +132,117 @@ fn summarize_fleet_result(response: &mut Value) {
 
     // Leave room for the envelope, calls, logs, and JSON punctuation. This is a
     // byte budget (like the final transport cap), not an estimated token count.
-    let per_instance_budget = RESPONSE_BUDGET
-        .saturating_sub(2 * 1024)
+    let per_instance_budget = FLEET_RESULT_BUDGET
         .checked_div(results.len())
         .unwrap_or(0)
         .max(256);
 
     for item in results {
-        let original_len = serialized_len(item);
-        if original_len <= per_instance_budget {
-            if let Some(object) = item.as_object_mut() {
-                object.insert("truncated".into(), Value::Bool(false));
-            }
-            continue;
-        }
-
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        let value = object.remove("value").unwrap_or(Value::Null);
-        let value_len = serialized_len(&value);
-        let value_type = match &value {
-            Value::Null => "null",
-            Value::Bool(_) => "boolean",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-        };
-        let item_count = match &value {
-            Value::Array(items) => Some(items.len()),
-            Value::Object(fields) => Some(fields.len()),
-            _ => None,
-        };
-        let mut summary = serde_json::Map::from_iter([
-            ("type".into(), Value::String(value_type.into())),
-            ("original_bytes".into(), json!(value_len)),
-        ]);
-        if let Some(count) = item_count {
-            summary.insert("item_count".into(), json!(count));
-        }
-        object.insert("value".into(), Value::Null);
-        object.insert("truncated".into(), Value::Bool(true));
-        object.insert("summary".into(), Value::Object(summary));
+        truncate_fleet_row(item, per_instance_budget);
     }
+}
+
+/// Bound one fleet row before it enters the aggregate result or QuickJS heap.
+pub(crate) fn truncate_fleet_row(item: &mut Value, budget: usize) {
+    if item.get("truncated").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    if !serialized_len_exceeds(item, budget) {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("truncated".into(), Value::Bool(false));
+        }
+        return;
+    }
+
+    let Some(object) = item.as_object_mut() else {
+        *item = json!({"ok": false, "truncated": true});
+        return;
+    };
+    let name = object.get("name").cloned().unwrap_or(Value::Null);
+    let ok = object.get("ok").cloned().unwrap_or(Value::Bool(false));
+    let outcome = object.get("outcome").cloned().unwrap_or(Value::Null);
+    let elapsed = object.get("elapsed_ms").cloned().unwrap_or(Value::Null);
+    let payload = object
+        .remove("value")
+        .or_else(|| object.remove("error"))
+        .unwrap_or(Value::Null);
+    let payload_len = serialized_len(&payload);
+    let payload_type = match &payload {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    let item_count = match &payload {
+        Value::Array(items) => Some(items.len()),
+        Value::Object(fields) => Some(fields.len()),
+        _ => None,
+    };
+    let mut summary = serde_json::Map::from_iter([
+        ("type".into(), Value::String(payload_type.into())),
+        ("original_bytes".into(), json!(payload_len)),
+    ]);
+    if let Some(count) = item_count {
+        summary.insert("item_count".into(), json!(count));
+    }
+    *item = json!({
+        "name": name,
+        "ok": ok,
+        "outcome": outcome,
+        "value": null,
+        "error": if ok == Value::Bool(false) { Value::String("upstream error exceeded the per-instance response budget".into()) } else { Value::Null },
+        "truncated": true,
+        "summary": summary,
+        "elapsed_ms": elapsed,
+    });
 }
 
 /// True iff the compact serialization of `value` is within budget.
 fn within_budget(value: &Value) -> bool {
-    serialized_len(value) <= RESPONSE_BUDGET
+    !serialized_len_exceeds(value, RESPONSE_BUDGET)
 }
 
 fn serialized_len(value: &Value) -> usize {
-    // Fail SAFE: a (near-impossible) serialize failure on an already-materialized
-    // `Value` reports max size so we err toward truncating, never toward emitting an
-    // unbounded envelope the blunt transport cap would then chop mid-JSON.
-    serde_json::to_string(value)
-        .map(|s| s.len())
-        .unwrap_or(usize::MAX)
+    let mut writer = CountingWriter::new(usize::MAX);
+    serde_json::to_writer(&mut writer, value).map_or(usize::MAX, |()| writer.bytes)
+}
+
+fn serialized_len_exceeds(value: &Value, limit: usize) -> bool {
+    let mut writer = CountingWriter::new(limit);
+    serde_json::to_writer(&mut writer, value).is_err() || writer.exceeded
+}
+
+struct CountingWriter {
+    bytes: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl CountingWriter {
+    const fn new(limit: usize) -> Self {
+        Self {
+            bytes: 0,
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buffer.len());
+        if self.bytes > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::other("serialization budget exceeded"));
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Remove array `field` from the envelope (replacing it with `[]`) and return its
@@ -220,11 +290,12 @@ fn marker_oversized_result(response: &mut Value) {
 
 /// Fit the largest suffix (newest entries) of `items` into `response[field]` that
 /// keeps the envelope within budget, prepending `sentinel(dropped)` when any are
-/// dropped. Binary search keeps this O(n log n) serializations rather than O(n^2).
+/// dropped. Serialized item lengths are computed once, so probing is linear in
+/// the total payload size and retained values are moved exactly once.
 fn fit_newest(
     response: &mut Value,
     field: &str,
-    items: Vec<Value>,
+    mut items: Vec<Value>,
     sentinel: impl Fn(usize) -> Value,
 ) {
     let total = items.len();
@@ -232,34 +303,35 @@ fn fit_newest(
         return;
     }
 
-    // `keep` = number of newest entries retained. Find the largest `keep` that fits.
-    let set = |response: &mut Value, keep: usize| {
+    response[field] = Value::Array(Vec::new());
+    let base_len = serialized_len(response).saturating_sub(2);
+    let item_lengths = items.iter().map(serialized_len).collect::<Vec<_>>();
+    let mut retained_bytes = 0usize;
+    let mut best = 0usize;
+    for keep in 0..=total {
+        if keep > 0 {
+            retained_bytes = retained_bytes.saturating_add(item_lengths[total - keep]);
+        }
         let dropped = total - keep;
-        let mut out: Vec<Value> = Vec::with_capacity(keep + 1);
-        if dropped > 0 {
-            out.push(sentinel(dropped));
-        }
-        out.extend(items[total - keep..].iter().cloned());
-        response[field] = Value::Array(out);
-    };
-
-    // Fast path: does everything fit?
-    set(response, total);
-    if within_budget(response) {
-        return;
-    }
-
-    let (mut lo, mut hi) = (0usize, total);
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2); // bias toward keeping more
-        set(response, mid);
-        if within_budget(response) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
+        let sentinel_len = (dropped > 0).then(|| serialized_len(&sentinel(dropped)));
+        let element_count = keep + usize::from(sentinel_len.is_some());
+        let array_len = 2usize
+            .saturating_add(retained_bytes)
+            .saturating_add(sentinel_len.unwrap_or(0))
+            .saturating_add(element_count.saturating_sub(1));
+        if base_len.saturating_add(array_len) <= RESPONSE_BUDGET {
+            best = keep;
         }
     }
-    set(response, lo);
+
+    let dropped = total - best;
+    let retained = items.split_off(dropped);
+    let mut out = Vec::with_capacity(best + usize::from(dropped > 0));
+    if dropped > 0 {
+        out.push(sentinel(dropped));
+    }
+    out.extend(retained);
+    response[field] = Value::Array(out);
 }
 
 /// The largest char-boundary prefix of `s` that is at most `max_bytes` bytes.

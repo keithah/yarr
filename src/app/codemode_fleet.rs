@@ -7,7 +7,7 @@ use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 
 use super::FleetMapRequest;
-use crate::actions::{YarrAction, execute_service_action};
+use crate::actions::{ActionImpact, YarrAction, action_impact, execute_service_action};
 use crate::app::YarrService;
 use crate::config::ServiceKind;
 
@@ -16,7 +16,13 @@ pub(crate) struct FleetAuthorization {
     pub targets: Vec<String>,
     pub action: String,
     pub scope_action: &'static str,
-    pub destructive: bool,
+    pub impact: ActionImpact,
+}
+
+pub(super) struct PreparedFleet {
+    pub authorization: FleetAuthorization,
+    request: std::sync::Arc<FleetMapRequest>,
+    status: bool,
 }
 
 impl YarrService {
@@ -44,80 +50,121 @@ impl YarrService {
         Ok(targets)
     }
 
+    #[cfg(test)]
     pub(crate) fn fleet_authorization(
         &self,
         request: &FleetMapRequest,
     ) -> Result<FleetAuthorization> {
+        Ok(self.prepare_fleet(request)?.authorization)
+    }
+
+    pub(super) fn prepare_fleet(&self, request: &FleetMapRequest) -> Result<PreparedFleet> {
         let targets = self.fleet_targets(request)?;
         let Some(first) = targets.first() else {
-            return Ok(FleetAuthorization {
-                targets,
-                action: "service_status".into(),
-                scope_action: "service_status",
-                destructive: false,
+            return Ok(PreparedFleet {
+                authorization: FleetAuthorization {
+                    targets,
+                    action: "service_status".into(),
+                    scope_action: "service_status",
+                    impact: ActionImpact::Read,
+                },
+                request: std::sync::Arc::new(request.clone()),
+                status: request.kind == "*" && request.method == "service_status",
             });
         };
-        let action = self.fleet_action(first, request)?;
-        let destructive = match &action {
-            YarrAction::Op { service, op, .. } => {
-                self.kind_of(service)?
-                    .and_then(|kind| crate::openapi::classify_operation(kind, op))
-                    == Some(crate::openapi::OperationSafety::Destructive)
-            }
-            _ => crate::actions::action_is_destructive(action.name()),
-        };
-        Ok(FleetAuthorization {
-            targets,
-            action: request.method.clone(),
-            scope_action: action.name(),
-            destructive,
+        // Every non-`*` fleet target has the same kind, so operation validity and
+        // impact are identical. Build one representative action here; target
+        // actions are materialized lazily inside the bounded stream.
+        let first_action = self.fleet_action(first, request)?;
+        let first_impact = action_impact(self, &first_action)?;
+        let scope_action = first_action.name();
+        Ok(PreparedFleet {
+            authorization: FleetAuthorization {
+                targets,
+                action: request.method.clone(),
+                scope_action,
+                impact: first_impact,
+            },
+            request: std::sync::Arc::new(request.clone()),
+            status: request.kind == "*" && request.method == "service_status",
         })
     }
 
     pub(crate) async fn fleet_map(&self, request: &FleetMapRequest) -> Result<Value> {
-        let targets = self.fleet_targets(request)?;
-        // Validate once before spawning. A bad kind/method is a script error;
-        // upstream failures after validation are isolated per instance.
-        for target in &targets {
-            self.fleet_action(target, request)?;
-        }
+        let prepared = self.prepare_fleet(request)?;
+        self.execute_prepared_fleet(prepared, None).await
+    }
+
+    pub(super) async fn execute_prepared_fleet(
+        &self,
+        prepared: PreparedFleet,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Value> {
+        let PreparedFleet {
+            authorization,
+            request,
+            status,
+        } = prepared;
+        let targets = authorization.targets;
+        let impact = authorization.impact;
         let timeout = self.fleet_instance_timeout;
+        let per_instance_budget = crate::codemode::truncate::FLEET_RESULT_BUDGET
+            .checked_div(targets.len())
+            .unwrap_or(0)
+            .max(256);
         let mut results = stream::iter(targets.into_iter().map(|name| {
             let request = request.clone();
             async move {
                 let started = Instant::now();
-                let result = match self.fleet_action(&name, &request) {
-                    Ok(action) => match tokio::time::timeout(
-                        timeout,
-                        Box::pin(execute_service_action(self, &action)),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!(
-                            "instance timed out after {} ms",
-                            timeout.as_millis()
-                        )),
-                    },
-                    Err(error) => Err(error),
+                let result = if impact.mutates()
+                    && deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    None
+                } else {
+                    Some(match self.fleet_action(&name, &request) {
+                        Ok(action) if impact.uses_instance_timeout() => match tokio::time::timeout(
+                            timeout,
+                            execute_service_action(self, &action),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::anyhow!(
+                                "instance timed out after {} ms",
+                                timeout.as_millis()
+                            )),
+                        },
+                        Ok(action) => execute_service_action(self, &action).await,
+                        Err(error) => Err(error),
+                    })
                 };
-                match result {
-                    Ok(value) => json!({
+                let mut row = match result {
+                    None => json!({
+                        "name": name, "ok": false,
+                        "outcome": "not_dispatched",
+                        "error": "Code Mode deadline expired before this mutation was dispatched",
+                        "truncated": false, "elapsed_ms": started.elapsed().as_millis(),
+                    }),
+                    Some(Ok(value)) => json!({
                         "name": name, "ok": true, "value": value,
+                        "outcome": if impact.mutates() { "confirmed" } else { "read" },
                         "truncated": false, "elapsed_ms": started.elapsed().as_millis(),
                     }),
-                    Err(error) => json!({
+                    Some(Err(error)) => json!({
                         "name": name, "ok": false, "error": error.to_string(),
+                        "outcome": if impact.mutates() { "indeterminate" } else { "failed" },
                         "truncated": false, "elapsed_ms": started.elapsed().as_millis(),
                     }),
-                }
+                };
+                crate::codemode::truncate::truncate_fleet_row(&mut row, per_instance_budget);
+                row
             }
         }))
         .buffer_unordered(self.fleet_max_concurrent)
         .collect::<Vec<_>>()
         .await;
         results.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
-        if request.kind == "*" && request.method == "service_status" {
+        if status {
             return Ok(Value::Array(
                 results
                     .into_iter()
@@ -146,7 +193,7 @@ impl YarrService {
             "name": name,
             "kind": kind,
             "reachable": row["ok"],
-            "version": find_version(&row["value"]),
+            "version": find_version(kind, &row["value"]),
             "latency_ms": row["elapsed_ms"],
             "error": row.get("error").cloned().unwrap_or(Value::Null),
             "truncated": row["truncated"],
@@ -193,13 +240,18 @@ impl YarrService {
     }
 }
 
-fn find_version(value: &Value) -> Option<&str> {
-    match value {
-        Value::Object(object) => ["version", "productVersion", "pms_version"]
-            .iter()
-            .find_map(|field| object.get(*field).and_then(Value::as_str))
-            .or_else(|| object.values().find_map(find_version)),
-        Value::Array(items) => items.iter().find_map(find_version),
-        _ => None,
-    }
+fn find_version<'a>(kind: Option<&str>, value: &'a Value) -> Option<&'a str> {
+    let paths: &[&str] = match kind {
+        Some("plex") => &["/MediaContainer/version", "/version"],
+        Some("tautulli") => &[
+            "/response/data/tautulli_version",
+            "/response/data/pms_version",
+        ],
+        Some("jellyfin") => &["/Version", "/version"],
+        Some("qbittorrent") => &["/version", "/app/version"],
+        _ => &["/version", "/productVersion"],
+    };
+    paths
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(Value::as_str))
 }

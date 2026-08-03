@@ -30,9 +30,10 @@ fn inner_codemode_guard_classifies_plex_terminate_as_destructive() {
     };
 
     assert_eq!(
-        super::destructive_inner_call(&state, &action),
-        (true, "plex_den")
+        crate::actions::action_impact(&state.service, &action).unwrap(),
+        crate::actions::ActionImpact::Destructive
     );
+    assert_eq!(crate::actions::target_service(&action), Some("plex_den"));
 }
 
 #[tokio::test]

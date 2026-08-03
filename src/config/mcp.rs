@@ -44,13 +44,15 @@ pub struct McpConfig {
     pub codemode_max_concurrent: usize,
     /// Maximum queue wait in milliseconds before overload rejection.
     pub codemode_queue_timeout_ms: u64,
-    /// Absolute Code Mode wall-clock deadline in seconds.
+    /// Code Mode execution/admission deadline. Already-dispatched mutations
+    /// drain to a receipt instead of being cancelled into an ambiguous timeout.
     pub codemode_timeout_secs: u64,
     /// Maximum targets allowed in one destructive fleet dispatch.
     pub destructive_fanout_max: usize,
     /// Maximum concurrently dispatched upstreams within one fleet operation.
     pub fleet_max_concurrent: usize,
-    /// Independent per-instance fleet request deadline.
+    /// Independent per-instance deadline for read-only fleet requests. Writes
+    /// drain after dispatch so a committed mutation is never reported as a timeout.
     pub fleet_instance_timeout_secs: u64,
 }
 

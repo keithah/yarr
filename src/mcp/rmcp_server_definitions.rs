@@ -88,15 +88,36 @@ pub(super) fn tool_result_from_json(value: Value) -> Result<CallToolResult, Erro
 /// classification requires elicitation. DELETE is always destructive; the
 /// explicit safety table also covers high-impact POST/PUT operations such as
 /// Plex session termination and library scans.
+#[cfg(test)]
 pub(super) fn is_destructive_op_call(state: &AppState, tool_name: &str, arguments: &Value) -> bool {
     let Some(op_name) = arguments.get("op").and_then(Value::as_str) else {
         return false;
     };
-    let Ok(Some(kind)) = state.service.kind_of(tool_name) else {
-        return false;
+    let action = crate::actions::YarrAction::Op {
+        service: tool_name.to_owned(),
+        op: op_name.to_owned(),
+        args: arguments
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
     };
-    crate::openapi::classify_operation(kind, op_name)
-        == Some(crate::openapi::OperationSafety::Destructive)
+    crate::actions::action_impact(&state.service, &action)
+        .is_ok_and(|impact| impact == crate::actions::ActionImpact::Destructive)
+}
+
+pub(super) fn is_destructive_action_call(
+    state: &AppState,
+    tool_name: &str,
+    action_name: &str,
+    arguments: &Value,
+) -> bool {
+    let mut arguments = arguments.as_object().cloned().unwrap_or_default();
+    arguments.insert("action".into(), Value::String(action_name.to_owned()));
+    arguments.insert("service".into(), Value::String(tool_name.to_owned()));
+    crate::actions::YarrAction::from_mcp_args(&Value::Object(arguments))
+        .ok()
+        .and_then(|action| crate::actions::action_impact(&state.service, &action).ok())
+        == Some(crate::actions::ActionImpact::Destructive)
 }
 
 /// Result returned when a destructive action is declined at the elicitation

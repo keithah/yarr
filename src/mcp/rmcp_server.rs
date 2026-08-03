@@ -132,8 +132,7 @@ impl ServerHandler for YarrRmcpServer {
         // called from inside a script, which never reaches `call_tool` at all —
         // see `codemode_dispatch`) is checked separately by
         // `is_destructive_op_call`.
-        if (crate::actions::action_is_destructive(&action)
-            || (action == "op" && is_destructive_op_call(&self.state, &tool_name, &arguments)))
+        if is_destructive_action_call(&self.state, &tool_name, &action, &arguments)
             && elicit::gate_destructive(
                 &peer,
                 &action,
@@ -141,7 +140,7 @@ impl ServerHandler for YarrRmcpServer {
                 self.state.config.destructive_fanout_max,
             )
             .await
-                == elicit::DeleteGate::Declined
+                == elicit::DestructiveGate::Declined
         {
             tracing::info!(
                 tool = %tool_name,
