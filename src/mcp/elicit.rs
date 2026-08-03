@@ -1,4 +1,4 @@
-//! Destructive-delete elicitation gate (MCP-only).
+//! Destructive-action elicitation gate (MCP-only).
 //!
 //! Destructive deletes ([`crate::actions::action_is_destructive`]) get a real,
 //! interactive confirmation prompt on the MCP surface via *elicitation* (rmcp
@@ -27,20 +27,20 @@ use serde::Deserialize;
 /// indefinitely.
 const ELICIT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Structured payload requested from the user for a destructive delete. A single
+/// Structured payload requested from the user for a destructive action. A single
 /// boolean: the client renders a confirm prompt from the generated schema.
 /// `Accept` with `confirm=true` proceeds; anything else aborts.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct DeleteConfirmation {
-    /// Set true to confirm and run this destructive delete.
+pub(crate) struct DestructiveConfirmation {
+    /// Set true to confirm and run this destructive action.
     pub confirm: bool,
 }
 
-rmcp::elicit_safe!(DeleteConfirmation);
+rmcp::elicit_safe!(DestructiveConfirmation);
 
 /// How a destructive action should be handled on the MCP surface.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DeleteGate {
+pub(crate) enum DestructiveGate {
     /// The user explicitly approved the elicitation prompt.
     Proceed,
     /// The user declined/cancelled (or the prompt failed) — do NOT run it.
@@ -64,20 +64,56 @@ enum ElicitOutcome {
     Unsupported,
 }
 
-/// The elicitation prompt shown to the user before a destructive delete.
-pub(crate) fn confirm_message(action: &str, service: &str) -> String {
+/// The elicitation prompt shown to the user before a destructive action.
+pub(crate) fn confirm_message(action: &str, services: &[String]) -> String {
+    let mut names = services.to_vec();
+    names.sort();
+    names.dedup();
+    if names.len() == 1 {
+        return format!(
+            "Confirm destructive action '{action}' on service '{}'. This operation has high \
+             impact or permanently deletes data and cannot be undone. Approve to proceed.",
+            names[0]
+        );
+    }
     format!(
-        "Confirm destructive action '{action}' on service '{service}'. This permanently \
-         deletes data and cannot be undone. Approve to proceed."
+        "Confirm destructive fleet action '{action}' on {} instances: {}. This operation has \
+         high impact or permanently deletes data and cannot be undone. Approve once to dispatch \
+         to every named instance.",
+        names.len(),
+        names.join(", ")
     )
 }
 
-/// Pure decision: map a normalized [`ElicitOutcome`] to a [`DeleteGate`]. Fully
+pub(crate) fn validate_destructive_targets(
+    services: &[String],
+    maximum: usize,
+) -> Result<Vec<String>, String> {
+    let mut names = services
+        .iter()
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Err("destructive action has no target instances".to_owned());
+    }
+    if names.len() > maximum {
+        return Err(format!(
+            "destructive fleet action targets {} instances but the configured maximum is {maximum}; target explicitly in groups of at most {maximum}",
+            names.len()
+        ));
+    }
+    Ok(names)
+}
+
+/// Pure decision: map a normalized [`ElicitOutcome`] to a [`DestructiveGate`]. Fully
 /// unit-testable (no `Peer`, no rmcp error types).
-fn classify(outcome: ElicitOutcome) -> DeleteGate {
+fn classify(outcome: ElicitOutcome) -> DestructiveGate {
     match outcome {
-        ElicitOutcome::Confirmed => DeleteGate::Proceed,
-        ElicitOutcome::Refused | ElicitOutcome::Unsupported => DeleteGate::Declined,
+        ElicitOutcome::Confirmed => DestructiveGate::Proceed,
+        ElicitOutcome::Refused | ElicitOutcome::Unsupported => DestructiveGate::Declined,
     }
 }
 
@@ -88,10 +124,10 @@ fn classify(outcome: ElicitOutcome) -> DeleteGate {
 /// `Ok` arms are unit-tested; the `Err` arms cannot be (non-constructible
 /// `#[non_exhaustive]` error), so they are kept to a trivial, obviously-safe
 /// match.
-fn normalize(result: Result<Option<DeleteConfirmation>, ElicitationError>) -> ElicitOutcome {
+fn normalize(result: Result<Option<DestructiveConfirmation>, ElicitationError>) -> ElicitOutcome {
     match result {
-        Ok(Some(DeleteConfirmation { confirm: true })) => ElicitOutcome::Confirmed,
-        Ok(Some(DeleteConfirmation { confirm: false })) | Ok(None) => ElicitOutcome::Refused,
+        Ok(Some(DestructiveConfirmation { confirm: true })) => ElicitOutcome::Confirmed,
+        Ok(Some(DestructiveConfirmation { confirm: false })) | Ok(None) => ElicitOutcome::Refused,
         Err(ElicitationError::CapabilityNotSupported) => ElicitOutcome::Unsupported,
         Err(_) => ElicitOutcome::Refused,
     }
@@ -99,21 +135,25 @@ fn normalize(result: Result<Option<DeleteConfirmation>, ElicitationError>) -> El
 
 /// Gate a destructive `action` targeting `service` on the MCP surface.
 ///
-/// 1. Client can't elicit → [`DeleteGate::Declined`] (fail closed).
+/// 1. Client can't elicit → [`DestructiveGate::Declined`] (fail closed).
 /// 2. Otherwise prompt (with a timeout) and map the outcome ([`normalize`] +
 ///    [`classify`]) — there is no way to skip this prompt from the call
 ///    arguments.
 pub(crate) async fn gate_destructive(
     peer: &Peer<RoleServer>,
     action: &str,
-    service: &str,
-) -> DeleteGate {
+    services: &[String],
+    maximum: usize,
+) -> DestructiveGate {
+    let Ok(services) = validate_destructive_targets(services, maximum) else {
+        return DestructiveGate::Declined;
+    };
     if peer.supported_elicitation_modes().is_empty() {
-        return DeleteGate::Declined;
+        return DestructiveGate::Declined;
     }
     let result = peer
-        .elicit_with_timeout::<DeleteConfirmation>(
-            confirm_message(action, service),
+        .elicit_with_timeout::<DestructiveConfirmation>(
+            confirm_message(action, &services),
             Some(ELICIT_TIMEOUT),
         )
         .await;

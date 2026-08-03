@@ -44,8 +44,16 @@ pub struct McpConfig {
     pub codemode_max_concurrent: usize,
     /// Maximum queue wait in milliseconds before overload rejection.
     pub codemode_queue_timeout_ms: u64,
-    /// Absolute Code Mode wall-clock deadline in seconds.
+    /// Code Mode execution/admission deadline. Already-dispatched mutations
+    /// drain to a receipt instead of being cancelled into an ambiguous timeout.
     pub codemode_timeout_secs: u64,
+    /// Maximum targets allowed in one destructive fleet dispatch.
+    pub destructive_fanout_max: usize,
+    /// Maximum concurrently dispatched upstreams within one fleet operation.
+    pub fleet_max_concurrent: usize,
+    /// Independent per-instance deadline for read-only fleet requests. Writes
+    /// drain after dispatch so a committed mutation is never reported as a timeout.
+    pub fleet_instance_timeout_secs: u64,
 }
 
 /// MCP tool-registration mode (YARR_MCP_TOOL_MODE).
@@ -137,6 +145,9 @@ impl Default for McpConfig {
             codemode_max_concurrent: crate::codemode::CODEMODE_MAX_CONCURRENT,
             codemode_queue_timeout_ms: crate::codemode::CODEMODE_QUEUE_TIMEOUT.as_millis() as u64,
             codemode_timeout_secs: crate::codemode::CODEMODE_TIMEOUT.as_secs(),
+            destructive_fanout_max: 3,
+            fleet_max_concurrent: crate::codemode::FLEET_MAX_CONCURRENT,
+            fleet_instance_timeout_secs: crate::codemode::FLEET_INSTANCE_TIMEOUT.as_secs(),
         }
     }
 }

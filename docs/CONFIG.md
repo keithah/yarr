@@ -22,9 +22,65 @@ Configuration can come from `config.toml`, environment variables, or `.env` file
 | `YARR_MCP_ALLOWED_ORIGINS` | unset | Extra CORS origins |
 | `YARR_MCP_AUTH_MODE` | `bearer` | `bearer` or `oauth` |
 | `YARR_MCP_TOOL_MODE` | `codemode` | `codemode` (one `yarr` tool; the fleet is reached inside a Code Mode script) or `flat` (one action-dispatched tool per configured service, no Code Mode layer; useful behind gateways that already provide dynamic discovery/Code Mode) |
-| `YARR_MCP_CODEMODE_MAX_CONCURRENT` | `4` | Maximum concurrently executing Code Mode runtimes; must be at least 1 |
+| `YARR_MCP_CODEMODE_MAX_CONCURRENT` | `4` | Maximum concurrently executing Code Mode runtimes (whole scripts, not requests within one script); must be at least 1 |
 | `YARR_MCP_CODEMODE_QUEUE_TIMEOUT_MS` | `500` | Maximum admission-queue wait before failing busy; must be non-zero |
-| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `30` | Execution deadline for one Code Mode run; must be non-zero |
+| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `120` | Execution and mutation-admission deadline for one Code Mode run; already-dispatched writes drain to a receipt instead of being cancelled; must be non-zero |
+| `YARR_MCP_DESTRUCTIVE_FANOUT_MAX` | `3` | Maximum instances in one destructive fleet dispatch; must be at least 1 |
+| `YARR_FLEET_MAX_CONCURRENT` | `8` | Maximum upstream calls running concurrently inside one `fleet.map`; must be at least 1 |
+| `YARR_FLEET_INSTANCE_TIMEOUT_SECS` | `8` | Independent deadline for each read-only fleet request; writes drain once dispatched and report `confirmed` or `indeterminate`; must be at least 1 |
+| `YARR_FLEET_READONLY` | unset | Comma-separated configured service names that reject every mutation on CLI and MCP |
+
+### Fleet runtime sizing
+
+`YARR_MCP_CODEMODE_MAX_CONCURRENT` limits whole QuickJS runtimes admitted by the
+server; it does not throttle calls made inside one script. Fleet fanout has its
+own bounded concurrency and per-instance timeout (see Fleet Code Mode below),
+and read waves must finish inside `YARR_MCP_CODEMODE_TIMEOUT_SECS`. Mutating
+fanout stops admitting queued targets at that deadline, marks them
+`not_dispatched`, and drains only the requests already sent upstream so their
+receipts can say `confirmed` or `indeterminate` instead of falsely reporting a
+timeout as no change.
+
+The shared HTTP client maintains a pool per upstream host (up to eight idle
+connections per host), so a slow Plex server does not consume a global
+connection pool. The QuickJS heap remains 64 MiB: fleet responses are bounded
+and summarized before they can be returned to the client. If one instance's
+value exceeds its share of the response budget, that instance is returned with
+`truncated: true`, a type/item-count/byte summary, and `value: null`; other
+instances retain independent completeness flags.
+
+### Fleet Code Mode
+
+The Code Mode preamble exposes configured names and bounded host-backed fanout:
+
+```js
+fleet.of("plex")
+// ["plex_4k", "plex_den"]
+
+fleet.all()
+// [{ name: "plex_4k", kind: "plex" }, ...]
+
+await fleet.map("plex", server => server.list_sessions())
+// [{ name, ok: true, value, truncated: false, elapsed_ms },
+//  { name, ok: false, error, truncated: false, elapsed_ms }]
+
+await fleet.status()
+// [{ name, kind, reachable, version, latency_ms, error, truncated }, ...]
+```
+
+`fleet.map` records exactly one service method from its callback and dispatches
+that method in Rust with bounded parallelism. An individual failure or timeout
+never rejects the map; results are sorted by configured name. Invalid kinds or
+methods reject before dispatch. Destructive methods are classified before any
+request begins: MCP elicits once with every target named, and the destructive
+fanout cap is enforced before the prompt. Read-only instances still reject
+mutations independently.
+
+Four built-in snippets are always listed by `codemode.snippets()` and run with
+`codemode.run(name)`: `fleet_activity`, `fleet_health`,
+`fleet_library_sizes`, and `fleet_transcode_load`. Built-ins cannot be
+overwritten or deleted and work even when no writable snippet directory is
+configured.
 
 ## Unauthenticated endpoints
 
@@ -49,6 +105,163 @@ YARR_PLEX_TOKEN=...
 ```
 
 Supported kinds: `sonarr`, `radarr`, `prowlarr`, `tautulli`, `overseerr`, `bazarr`, `tracearr`, `sabnzbd`, `qbittorrent`, `plex`, and `jellyfin`.
+
+### Multiple instances of one kind
+
+Each item in `YARR_SERVICES` is a configured **name**, not necessarily a service
+kind. Set `YARR_<NAME>_KIND` when the name differs from its kind:
+
+```bash
+YARR_SERVICES=plex_den,tautulli_den,plex_4k,tautulli_4k,sonarr,radarr
+
+YARR_PLEX_DEN_KIND=plex
+YARR_PLEX_DEN_URL=http://10.0.0.11:32400
+YARR_PLEX_DEN_TOKEN=...
+
+YARR_TAUTULLI_DEN_KIND=tautulli
+YARR_TAUTULLI_DEN_URL=http://10.0.0.11:8181
+YARR_TAUTULLI_DEN_API_KEY=...
+
+YARR_PLEX_4K_KIND=plex
+YARR_PLEX_4K_URL=http://10.0.0.12:32400
+YARR_PLEX_4K_TOKEN=...
+
+YARR_TAUTULLI_4K_KIND=tautulli
+YARR_TAUTULLI_4K_URL=http://10.0.0.12:8181
+YARR_TAUTULLI_4K_API_KEY=...
+
+YARR_SONARR_URL=http://10.0.0.20:8989
+YARR_SONARR_API_KEY=...
+YARR_RADARR_URL=http://10.0.0.20:7878
+YARR_RADARR_API_KEY=...
+```
+
+Configured names determine both environment namespaces and Code Mode globals:
+
+- Environment mapping uppercases the name and replaces every non-ASCII
+  alphanumeric character with `_`. Both `plex-den` and `plex_den` map to
+  `YARR_PLEX_DEN_*`, so configuring both fails with a duplicate-namespace error.
+- Prefer lowercase names with underscores. `plex_den` is a valid JavaScript
+  identifier and supports `plex_den.get_sessions()`. A name such as `plex-den`
+  requires bracket access: `globalThis["plex-den"].get_sessions()`.
+- Exact configured names always win during service resolution. A bare kind such
+  as `plex` is a convenience only while exactly one Plex instance exists. With
+  two Plex instances it is intentionally ambiguous, and the error lists the
+  configured names to use instead.
+- The Code Mode runtime owns these reserved globals: `api`, `callTool`,
+  `codemode`, `console`, `globalThis`, `input`, and `writeArtifact`. A service
+  name colliding with one of them fails startup and lists the reserved names.
+
+Names are matched case-insensitively for identity and must be unique. These
+rules are validated at startup so a configured service can never disappear
+silently from Code Mode.
+
+### Fleet configuration file
+
+For larger fleets, set `YARR_FLEET_FILE` to a `.yaml`, `.yml`, or `.toml` file.
+The file is additive: its entries are combined with `config.toml` and
+`YARR_SERVICES`. Environment-declared entries replace a same-named file entry;
+unique entries from both sources remain. The final union is sorted by configured
+name and passes the same duplicate-name, namespace-collision, reserved-global,
+and read-only validation as environment-only configuration.
+
+YAML example:
+
+```yaml
+services:
+  - name: plex_den
+    kind: plex
+    url: http://10.0.0.11:32400
+    token_env: PLEX_DEN_TOKEN
+    client_identifier: 0123456789abcdef
+  - name: tautulli_den
+    kind: tautulli
+    url: http://10.0.0.11:8181
+    api_key_env: TAUTULLI_DEN_KEY
+    plex: plex_den
+```
+
+Equivalent TOML:
+
+```toml
+[[services]]
+name = "plex_den"
+kind = "plex"
+url = "http://10.0.0.11:32400"
+token_env = "PLEX_DEN_TOKEN"
+client_identifier = "0123456789abcdef"
+
+[[services]]
+name = "tautulli_den"
+kind = "tautulli"
+url = "http://10.0.0.11:8181"
+api_key_env = "TAUTULLI_DEN_KEY"
+plex = "plex_den"
+```
+
+Fleet files never contain credential values. They may reference only
+`token_env`, `api_key_env`, `username_env`, and `password_env`; each value is an
+environment variable name resolved at startup. Inline fields such as `token`,
+`api_key`, `username`, or `password` are rejected with the source file, entry
+name, and line. A referenced variable that is unset or empty also fails startup.
+This keeps reviewable topology in the fleet file and secrets in `.env` or the
+process environment.
+
+Optional `client_identifier`, `plex`, and `relay_only` fields retain discovery
+identity, Tautulli pairing, and relay-selection metadata. They do not affect
+authentication.
+
+### Plex account discovery
+
+Scaffold owned Plex servers from a plex.tv account token without putting that
+token or any per-server token in a tool argument:
+
+```bash
+export PLEX_ACCOUNT_TOKEN=...
+yarr discover plex --owned-only --output fleet.yaml --env-output fleet.env
+```
+
+Owned servers are the default; use `--include-shared` only after reviewing the
+authority implications. Discovery filters resources to those whose `provides`
+list contains `server`, selects a local connection first, then direct HTTPS,
+then relay, and flags relay-only instances. Names are deterministic
+`plex_<server_slug>` identifiers; colliding slugs receive a stable short hash of
+the Plex `clientIdentifier`. The fleet file pins that identifier and contains
+only `token_env` references. `fleet.env` contains the per-resource tokens and is
+created with mode 0600 on Unix.
+
+Discovery never overwrites either output. Review and commit the fleet YAML, then
+load the companion secrets into the process environment (or merge them into
+your existing secret-managed `.env`). On subsequent runs use:
+
+```bash
+yarr discover plex --diff --output fleet.yaml
+```
+
+The diff is keyed by `clientIdentifier`, reports added, removed, renamed, and
+URL-changed servers, and exits 2 when drift exists. Configured Tautulli
+instances are queried with `get_server_info`; matches on `pms_identifier` are
+emitted as `plex: <name>` pairing hints, and the report names unpaired instances
+on both sides. An environment-declared Tautulli of the same name still
+overrides its URL and credential while retaining the file's pairing metadata.
+
+### Fleet write safety
+
+Set `YARR_FLEET_READONLY` to configured instance names that must never accept a
+mutation, even when the caller has `yarr:write` or uses the trusted local CLI:
+
+```bash
+YARR_FLEET_READONLY=plex_prod,tautulli_prod
+```
+
+Unknown names fail startup. Generated operations are classified from a reviewed
+operation table: every HTTP DELETE is destructive, and high-impact non-DELETE
+operations such as Plex `terminate_session`, metadata edits, section changes,
+and scans are also destructive. MCP dispatch elicits once with every affected
+instance named. A destructive fleet call above
+`YARR_MCP_DESTRUCTIVE_FANOUT_MAX` is refused; target smaller groups explicitly.
+The generated classification report is in
+[Tools, Actions, Params, and Endpoints](TOOLS_ACTIONS_ENDPOINTS.md).
 
 ## Auth Policy
 

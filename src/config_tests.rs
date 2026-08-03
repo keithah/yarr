@@ -85,3 +85,117 @@ fn invalid_static_token_scope_is_rejected() {
     let error = Config::load().unwrap_err();
     assert!(error.to_string().contains("yarr:admin"));
 }
+
+#[test]
+fn config_load_rejects_reserved_service_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_HOME", dir.path());
+    env.set("HOME", dir.path());
+    env.remove("YARR_CONFIG");
+    env.set("YARR_SERVICES", "console");
+    env.set("YARR_CONSOLE_KIND", "plex");
+    env.set("YARR_CONSOLE_URL", "http://localhost:32400");
+
+    let error = Config::load().unwrap_err();
+    assert!(error.to_string().contains("reserved Code Mode global"));
+    assert!(error.to_string().contains("console"));
+}
+
+#[test]
+fn config_load_merges_fleet_file_with_environment_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let fleet_path = dir.path().join("fleet.yaml");
+    std::fs::write(
+        &fleet_path,
+        "services:\n  - name: plex_den\n    kind: plex\n    url: http://file:32400\n    token_env: PLEX_DEN_TOKEN\n  - name: plex_4k\n    kind: plex\n    url: http://4k:32400\n",
+    )
+    .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_HOME", dir.path());
+    env.set("HOME", dir.path());
+    env.remove("YARR_CONFIG");
+    env.set("YARR_FLEET_FILE", &fleet_path);
+    env.set("PLEX_DEN_TOKEN", "file-secret-reference");
+    env.set("YARR_SERVICES", "plex_den,sonarr");
+    env.set("YARR_PLEX_DEN_KIND", "plex");
+    env.set("YARR_PLEX_DEN_URL", "http://environment:32400");
+    env.set("YARR_PLEX_DEN_TOKEN", "environment-secret");
+    env.set("YARR_SONARR_URL", "http://sonarr:8989");
+    env.set("YARR_FLEET_READONLY", "plex_4k");
+
+    let loaded = Config::load().unwrap();
+
+    assert_eq!(loaded.yarr.services.len(), 3);
+    let den = loaded
+        .yarr
+        .services
+        .iter()
+        .find(|service| service.name == "plex_den")
+        .unwrap();
+    assert_eq!(den.base_url, "http://environment:32400");
+    assert_eq!(den.token.as_deref(), Some("environment-secret"));
+    assert!(
+        loaded
+            .yarr
+            .services
+            .iter()
+            .find(|service| service.name == "plex_4k")
+            .unwrap()
+            .read_only
+    );
+}
+
+#[test]
+fn config_load_does_not_resolve_a_secret_for_an_overridden_fleet_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let fleet_path = dir.path().join("fleet.yaml");
+    std::fs::write(
+        &fleet_path,
+        "services:\n  - name: plex_den\n    kind: plex\n    url: http://stale:32400\n    token_env: STALE_FLEET_TOKEN\n",
+    )
+    .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_HOME", dir.path());
+    env.set("HOME", dir.path());
+    env.remove("YARR_CONFIG");
+    env.remove("STALE_FLEET_TOKEN");
+    env.set("YARR_FLEET_FILE", &fleet_path);
+    env.set("YARR_SERVICES", "plex_den");
+    env.set("YARR_PLEX_DEN_KIND", "plex");
+    env.set("YARR_PLEX_DEN_URL", "http://current:32400");
+    env.set("YARR_PLEX_DEN_TOKEN", "current-secret");
+
+    let loaded = Config::load().unwrap();
+    let service = loaded.yarr.services.first().unwrap();
+    assert_eq!(service.name, "plex_den");
+    assert_eq!(service.base_url, "http://current:32400");
+    assert_eq!(service.token.as_deref(), Some("current-secret"));
+}
+
+#[test]
+fn fleet_merge_does_not_hide_duplicate_config_service_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let fleet_path = dir.path().join("fleet.yaml");
+    std::fs::write(
+        &config_path,
+        "[[yarr.services]]\nname='plex_den'\nkind='plex'\nbase_url='http://one'\n\n[[yarr.services]]\nname='PLEX_DEN'\nkind='plex'\nbase_url='http://two'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &fleet_path,
+        "services:\n  - name: plex_other\n    kind: plex\n    url: http://other\n",
+    )
+    .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_CONFIG", &config_path);
+    env.set("YARR_FLEET_FILE", &fleet_path);
+    env.remove("YARR_SERVICES");
+
+    let error = Config::load().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("duplicate configured service name"),
+        "{error:#}"
+    );
+}

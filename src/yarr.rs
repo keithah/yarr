@@ -28,6 +28,7 @@ pub mod helpers;
 mod openapi_transport;
 #[path = "yarr/response.rs"]
 mod response;
+use response::RequestSummary;
 
 pub use helpers::{build_url, query_get, slim, validate_safe_path};
 pub(crate) use openapi_transport::{EncodedRequestBody, MultipartField, OpenApiRequest};
@@ -213,6 +214,7 @@ impl YarrClient {
             &self.client
         };
         let url = build_url(service, path)?;
+        let summary = RequestSummary::new(&method, &url);
         let mut request = http.request(method, url);
         request = auth::apply_auth(request, service);
         if let Some(accept) = accept_mime {
@@ -221,7 +223,7 @@ impl YarrClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        self.finish_with_retry(service, request).await
+        self.finish_with_retry(service, request, summary).await
     }
 
     /// Send a request to a **pre-built URL** with any method + optional body.
@@ -246,6 +248,7 @@ impl YarrClient {
         } else {
             &self.client
         };
+        let summary = RequestSummary::new(&method, &url);
         let mut request = http.request(method, url);
         request = auth::apply_auth(request, service);
         if let Some(accept) = accept_mime {
@@ -254,7 +257,7 @@ impl YarrClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        self.finish_with_retry(service, request).await
+        self.finish_with_retry(service, request, summary).await
     }
 
     pub async fn request_url_multipart_file(
@@ -278,9 +281,10 @@ impl YarrClient {
             .mime_str("application/zip")?;
         let form = reqwest::multipart::Form::new().part(field_name.to_string(), part);
 
+        let summary = RequestSummary::new(&method, &url);
         let mut request = http.request(method, url);
         request = auth::apply_auth(request, service).multipart(form);
-        self.finish_with_retry(service, request).await
+        self.finish_with_retry(service, request, summary).await
     }
 
     /// Send a pre-built request (used by query-style helpers) and parse it.
@@ -297,12 +301,13 @@ impl YarrClient {
         } else {
             &self.client
         };
+        let summary = RequestSummary::new(&Method::GET, &url);
         let mut request = http.get(url);
         request = auth::apply_auth(request, service);
         if let Some(accept) = accept_mime {
             request = request.header(reqwest::header::ACCEPT, accept);
         }
-        self.finish_with_retry(service, request).await
+        self.finish_with_retry(service, request, summary).await
     }
 
     /// Send a `application/x-www-form-urlencoded` POST to a pre-built URL.
@@ -326,8 +331,9 @@ impl YarrClient {
         } else {
             &self.client
         };
+        let summary = RequestSummary::new(&Method::POST, &url);
         let mut request = http.post(url).form(form);
         request = auth::apply_auth(request, service);
-        self.finish_with_retry(service, request).await
+        self.finish_with_retry(service, request, summary).await
     }
 }

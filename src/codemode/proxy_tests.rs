@@ -46,12 +46,11 @@ fn no_flat_tools_namespace() {
 }
 
 #[test]
-fn reserved_global_name_is_not_clobbered() {
-    // A service literally named `api` must not get a top-level binding that would
-    // overwrite the raw-API client; the client itself is still present.
-    let pre = build_preamble(&[("api".to_string(), ServiceKind::Sonarr)]);
-    assert!(!pre.contains(r#"globalThis["api"] = {"#));
-    assert!(pre.contains("globalThis.api = {};"));
+#[should_panic(expected = "collides with a reserved Code Mode global")]
+fn reserved_global_cannot_reach_preamble_generation() {
+    // Startup validation is authoritative. This assertion protects direct
+    // programmatic construction from silently hiding the configured service.
+    let _ = build_preamble(&[("api".to_string(), ServiceKind::Sonarr)]);
 }
 
 #[test]
@@ -99,4 +98,12 @@ fn snippet_verbs_are_not_callable_namespaces() {
     assert!(pre.contains("globalThis.codemode.snippets ="));
     // And `input` is wired (defaults to null for non-snippet runs).
     assert!(pre.contains("globalThis.input ="));
+}
+
+#[test]
+fn fleet_global_contains_stable_inventory_and_host_backed_map() {
+    let pre = build_preamble(&services());
+    assert!(pre.contains("globalThis.fleet ="));
+    assert!(pre.contains("__yarr_fleet_services"));
+    assert!(pre.contains(r#"callTool("__fleet_map""#));
 }

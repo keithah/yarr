@@ -78,3 +78,79 @@ fn shared_guard_skips_unknown_service_name() {
     validate_action_for_service(&state.service, "set_quality", "not-configured")
         .expect("guard is a no-op for unknown service names");
 }
+
+#[test]
+fn canonical_impact_classifies_generated_and_passthrough_actions() {
+    use crate::actions::ActionImpact;
+
+    let config = crate::config::YarrConfig {
+        services: vec![crate::config::ServiceConfig {
+            name: "plex".into(),
+            kind: crate::config::ServiceKind::Plex,
+            base_url: "http://127.0.0.1:9".into(),
+            ..crate::config::ServiceConfig::default()
+        }],
+    };
+    let service =
+        crate::app::YarrService::new(crate::yarr::YarrClient::new(&config).unwrap(), config);
+
+    let read = YarrAction::ServiceStatus {
+        service: "plex".into(),
+    };
+    let mutation = YarrAction::ApiPost {
+        service: "plex".into(),
+        path: "/library/sections/1/refresh".into(),
+        body: serde_json::json!({}),
+    };
+    let destructive = YarrAction::Op {
+        service: "plex".into(),
+        op: "terminate_session".into(),
+        args: serde_json::json!({}),
+    };
+
+    assert_eq!(action_impact(&service, &read).unwrap(), ActionImpact::Read);
+    assert_eq!(
+        action_impact(&service, &mutation).unwrap(),
+        ActionImpact::Mutating
+    );
+    assert_eq!(
+        action_impact(&service, &destructive).unwrap(),
+        ActionImpact::Destructive
+    );
+    assert!(ActionImpact::Read.uses_instance_timeout());
+    assert!(!ActionImpact::Mutating.uses_instance_timeout());
+    assert!(!ActionImpact::Destructive.uses_instance_timeout());
+}
+
+#[tokio::test]
+async fn readonly_instance_refuses_mutation_before_upstream_dispatch() {
+    use crate::{
+        app::YarrService,
+        config::{ServiceConfig, ServiceKind, YarrConfig},
+        yarr::YarrClient,
+    };
+
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "plex_prod".into(),
+            kind: ServiceKind::Plex,
+            base_url: "http://127.0.0.1:9".into(),
+            read_only: true,
+            ..ServiceConfig::default()
+        }],
+    };
+    let service = YarrService::new(YarrClient::new(&config).unwrap(), config);
+    let error = execute_service_action(
+        &service,
+        &YarrAction::ApiPost {
+            service: "plex_prod".into(),
+            path: "/library/sections/1/refresh".into(),
+            body: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("read-only"));
+    assert!(error.to_string().contains("plex_prod"));
+}

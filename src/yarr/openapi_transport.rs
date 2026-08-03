@@ -4,7 +4,7 @@ use anyhow::Result;
 use reqwest::Method;
 use serde_json::Value;
 
-use super::response::ResponseMode;
+use super::response::{RequestSummary, ResponseMode};
 use super::{YarrClient, auth};
 use crate::config::{ServiceConfig, ServiceKind};
 
@@ -64,6 +64,7 @@ impl YarrClient {
         } else {
             &self.client
         };
+        let summary = RequestSummary::new(&method, &url);
         let mut request = http.request(method, url);
         for (name, value) in headers {
             request = request.header(name, value);
@@ -93,6 +94,7 @@ impl YarrClient {
         self.finish_with_retry_mode(
             service,
             request,
+            summary,
             ResponseMode::OpenApi {
                 expected_encoding,
                 expected_media_type: expected_media_type.to_string(),

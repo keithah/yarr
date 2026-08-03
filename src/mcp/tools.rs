@@ -124,18 +124,26 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                 ));
             }
 
-            let (destructive, service_name) = destructive_inner_call(&self.state, action);
-            if !destructive {
+            let impact = crate::actions::action_impact(&self.state.service, action)
+                .map_err(|error| error.to_string())?;
+            if impact != crate::actions::ActionImpact::Destructive {
                 return Ok(());
             }
+            let service_name = crate::actions::target_service(action).unwrap_or(YARR_TOOL_NAME);
             if self.peer.supported_elicitation_modes().is_empty() {
                 return Err(format!(
                     "destructive inner Code Mode action `{}` requires an elicitation-capable MCP client; nothing changed",
                     action.name()
                 ));
             }
-            if super::elicit::gate_destructive(&self.peer, action.name(), service_name).await
-                == super::elicit::DeleteGate::Declined
+            if super::elicit::gate_destructive(
+                &self.peer,
+                action.name(),
+                &[service_name.to_owned()],
+                self.state.config.destructive_fanout_max,
+            )
+            .await
+                == super::elicit::DestructiveGate::Declined
             {
                 return Err(format!(
                     "destructive inner Code Mode action `{}` was not confirmed; nothing changed",
@@ -145,36 +153,54 @@ impl CodeModeCallGuard for McpCodeModeGuard {
             Ok(())
         })
     }
-}
 
-fn destructive_inner_call<'a>(state: &AppState, action: &'a YarrAction) -> (bool, &'a str) {
-    let service = match action {
-        YarrAction::ServiceStatus { service }
-        | YarrAction::ApiGet { service, .. }
-        | YarrAction::ApiPost { service, .. }
-        | YarrAction::ApiPut { service, .. }
-        | YarrAction::ApiDelete { service, .. }
-        | YarrAction::Op { service, .. } => service.as_str(),
-        YarrAction::Curated { params, .. } => params
-            .get("service")
-            .and_then(Value::as_str)
-            .unwrap_or(YARR_TOOL_NAME),
-        _ => YARR_TOOL_NAME,
-    };
-    let generated_delete = match action {
-        YarrAction::Op { service, op, .. } => state
-            .service
-            .kind_of(service)
-            .ok()
-            .flatten()
-            .and_then(|kind| crate::openapi::find_operation(kind, op))
-            .is_some_and(|spec| spec.method.is_delete()),
-        _ => false,
-    };
-    (
-        crate::actions::action_is_destructive(action.name()) || generated_delete,
-        service,
-    )
+    fn authorize_fleet<'a>(
+        &'a self,
+        authorization: &'a crate::app::codemode::fleet::FleetAuthorization,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            if let (Some(auth), Some(required)) = (
+                self.auth.as_ref(),
+                required_scope_for_action(authorization.scope_action),
+            ) && !crate::actions::scopes_satisfy(&auth.scopes, required)
+            {
+                return Err(format!(
+                    "forbidden fleet action `{}`: requires scope {required}",
+                    authorization.action
+                ));
+            }
+            if authorization.impact != crate::actions::ActionImpact::Destructive
+                || authorization.targets.is_empty()
+            {
+                return Ok(());
+            }
+            let targets = super::elicit::validate_destructive_targets(
+                &authorization.targets,
+                self.state.config.destructive_fanout_max,
+            )?;
+            if self.peer.supported_elicitation_modes().is_empty() {
+                return Err(format!(
+                    "destructive fleet action `{}` requires an elicitation-capable MCP client; nothing changed",
+                    authorization.action
+                ));
+            }
+            if super::elicit::gate_destructive(
+                &self.peer,
+                &authorization.action,
+                &targets,
+                self.state.config.destructive_fanout_max,
+            )
+            .await
+                == super::elicit::DestructiveGate::Declined
+            {
+                return Err(format!(
+                    "destructive fleet action `{}` was not confirmed; nothing changed",
+                    authorization.action
+                ));
+            }
+            Ok(())
+        })
+    }
 }
 
 async fn dispatch_service_tool(

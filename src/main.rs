@@ -23,7 +23,7 @@ use yarr::{
     AppState, AuthPolicy, AuthPolicyKind, Command, Config, READ_SCOPE, RunMode, WRITE_SCOPE,
     YarrClient, YarrService, acquire_oauth_instance_lock, apply_plugin_options, cli_usage,
     init_logging, parse_args_configured, resolve_auth_policy_kind, resolve_data_dir, rmcp_server,
-    router, run_cli_command, run_doctor, run_setup, run_watch,
+    router, run_cli_command, run_doctor, run_plex_discovery, run_setup, run_watch,
 };
 
 fn main() -> Result<()> {
@@ -133,6 +133,10 @@ async fn serve_stdio_mcp(config: Config) -> Result<()> {
             config.mcp.codemode_max_concurrent,
             Duration::from_millis(config.mcp.codemode_queue_timeout_ms),
             Duration::from_secs(config.mcp.codemode_timeout_secs),
+        )
+        .with_fleet_limits(
+            config.mcp.fleet_max_concurrent,
+            Duration::from_secs(config.mcp.fleet_instance_timeout_secs),
         );
     // Enable Code Mode `writeArtifact` under the data dir (best-effort).
     if let Ok(dir) = resolve_data_dir() {
@@ -166,6 +170,28 @@ async fn run_cli(config: Config) -> Result<()> {
             run_watch(&base, interval, once).await
         }
         Some(Command::Setup(command)) => run_setup(&config, command).await,
+        Some(Command::DiscoverPlex {
+            owned_only,
+            token_env,
+            output,
+            env_output,
+            diff,
+        }) => {
+            let (report, has_drift) = run_plex_discovery(
+                &config.yarr,
+                owned_only,
+                &token_env,
+                &output,
+                &env_output,
+                diff,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if has_drift {
+                std::process::exit(2);
+            }
+            Ok(())
+        }
         Some(cmd) => run_cli_command(cmd, &config.yarr).await,
         None => {
             eprintln!("Unknown command. Run `yarr --help` for usage.");
@@ -183,6 +209,10 @@ async fn build_state(config: Config) -> Result<AppState> {
             config.mcp.codemode_max_concurrent,
             Duration::from_millis(config.mcp.codemode_queue_timeout_ms),
             Duration::from_secs(config.mcp.codemode_timeout_secs),
+        )
+        .with_fleet_limits(
+            config.mcp.fleet_max_concurrent,
+            Duration::from_secs(config.mcp.fleet_instance_timeout_secs),
         );
     // Enable Code Mode `writeArtifact` under the data dir (best-effort).
     if let Ok(dir) = resolve_data_dir() {

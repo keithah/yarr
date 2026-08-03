@@ -5,6 +5,20 @@ use serde::{Deserialize, Serialize};
 
 pub(super) const SERVICE_HOME_DIRNAME: &str = ".yarr";
 
+/// Global JavaScript bindings owned by the Code Mode runtime. Configured
+/// service names may not collide with these names because doing so would either
+/// hide the service or clobber a safety/runtime primitive.
+pub(crate) const CODEMODE_RESERVED_GLOBALS: &[&str] = &[
+    "api",
+    "callTool",
+    "codemode",
+    "console",
+    "globalThis",
+    "input",
+    "fleet",
+    "writeArtifact",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ServiceConfig {
@@ -15,6 +29,14 @@ pub struct ServiceConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub token: Option<String>,
+    /// Instance policy: reject every mutating action on every transport.
+    pub read_only: bool,
+    /// Stable Plex machine identity used by discovery and Tautulli pairing.
+    pub client_identifier: Option<String>,
+    /// Optional configured Plex service paired with this Tautulli instance.
+    pub plex: Option<String>,
+    /// Discovery selected a bandwidth-limited Plex relay connection.
+    pub relay_only: bool,
 }
 
 impl Default for ServiceConfig {
@@ -27,6 +49,10 @@ impl Default for ServiceConfig {
             username: None,
             password: None,
             token: None,
+            read_only: false,
+            client_identifier: None,
+            plex: None,
+            relay_only: false,
         }
     }
 }
@@ -267,11 +293,78 @@ pub(super) fn load_services_from_env(config: &mut super::YarrConfig) -> anyhow::
             username: env_optional(&format!("YARR_{env_name}_USERNAME")),
             password: env_optional(&format!("YARR_{env_name}_PASSWORD")),
             token: env_optional(&format!("YARR_{env_name}_TOKEN")),
+            read_only: false,
+            client_identifier: None,
+            plex: None,
+            relay_only: false,
         };
         services.push(service);
     }
     if !services.is_empty() {
-        config.services = services;
+        config.services = super::fleet_file::merge_service_sources(
+            std::mem::take(&mut config.services),
+            services,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn apply_readonly_services(
+    services: &mut [ServiceConfig],
+    raw_names: &str,
+) -> anyhow::Result<()> {
+    for raw_name in raw_names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let Some(service) = services
+            .iter_mut()
+            .find(|service| service.name.eq_ignore_ascii_case(raw_name))
+        else {
+            anyhow::bail!(
+                "YARR_FLEET_READONLY service {raw_name:?} is not configured; configured services: {}",
+                services
+                    .iter()
+                    .map(|service| service.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        service.read_only = true;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_service_identities(services: &[ServiceConfig]) -> anyhow::Result<()> {
+    let mut names = std::collections::BTreeMap::<String, &str>::new();
+    let mut env_namespaces = std::collections::BTreeMap::<String, &str>::new();
+    for service in services {
+        let name = service.name.trim();
+        if name.is_empty() {
+            anyhow::bail!("configured service name must not be empty");
+        }
+        let normalized = name.to_ascii_lowercase();
+        if let Some(previous) = names.insert(normalized, name) {
+            anyhow::bail!(
+                "duplicate configured service name: {previous:?} and {name:?} differ only by case"
+            );
+        }
+        if CODEMODE_RESERVED_GLOBALS
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
+            anyhow::bail!(
+                "configured service name {name:?} collides with a reserved Code Mode global; reserved names: {}",
+                CODEMODE_RESERVED_GLOBALS.join(", ")
+            );
+        }
+        let namespace = service_env_name(name);
+        if let Some(previous) = env_namespaces.insert(namespace.clone(), name) {
+            anyhow::bail!(
+                "configured service names {previous:?} and {name:?} collide in environment namespace YARR_{namespace}_*; rename one service (underscores are recommended)"
+            );
+        }
     }
     Ok(())
 }

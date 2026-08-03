@@ -1,6 +1,41 @@
 use crate::testing::loopback_state;
 use serde_json::json;
 
+#[test]
+fn inner_codemode_guard_classifies_plex_terminate_as_destructive() {
+    use crate::{
+        actions::YarrAction,
+        app::YarrService,
+        config::{McpConfig, ServiceConfig, ServiceKind, YarrConfig},
+        server::{AppState, AuthPolicy},
+        yarr::YarrClient,
+    };
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "plex_den".into(),
+            kind: ServiceKind::Plex,
+            base_url: "http://localhost:32400".into(),
+            ..ServiceConfig::default()
+        }],
+    };
+    let state = AppState {
+        config: McpConfig::default(),
+        auth_policy: AuthPolicy::LoopbackDev,
+        service: YarrService::new(YarrClient::new(&config).unwrap(), config),
+    };
+    let action = YarrAction::Op {
+        service: "plex_den".into(),
+        op: "terminate_session".into(),
+        args: json!({}),
+    };
+
+    assert_eq!(
+        crate::actions::action_impact(&state.service, &action).unwrap(),
+        crate::actions::ActionImpact::Destructive
+    );
+    assert_eq!(crate::actions::target_service(&action), Some("plex_den"));
+}
+
 #[tokio::test]
 async fn yarr_tool_dispatches_codemode() {
     // The single `yarr` tool takes only `code` and runs it as the codemode action.

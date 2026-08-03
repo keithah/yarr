@@ -25,9 +25,16 @@ The template uses `YARR_*` variables. Rename the prefix when adapting the templa
 
 ## Upstream services
 
+For two or more instances of the same kind, see
+[Multiple instances of one kind](CONFIG.md#multiple-instances-of-one-kind). That
+section documents configured-name mapping, namespace collisions, Code Mode
+access, ambiguity errors, and reserved globals.
+
 | Variable | Purpose |
 |---|---|
 | `YARR_SERVICES` | Comma-separated configured service names, for example `sonarr,radarr,plex`. |
+| `YARR_FLEET_FILE` | Additive `.yaml`, `.yml`, or `.toml` fleet definition. File entries use credential `*_env` references; environment services override same-named entries. |
+| `PLEX_ACCOUNT_TOKEN` | Account token used only by `yarr discover plex`; override the variable name with `--token-env`. It is never written to fleet YAML. |
 | `YARR_<SERVICE>_KIND` | Optional service kind override. Defaults to the service name. |
 | `YARR_<SERVICE>_URL` | Upstream service base URL. Required for each configured service. |
 | `YARR_<SERVICE>_API_KEY` | API key for services that use `X-Api-Key`, query API keys, or token-compatible auth. |
@@ -36,6 +43,7 @@ The template uses `YARR_*` variables. Rename the prefix when adapting the templa
 | `YARR_<SERVICE>_TOKEN` | Bearer/token auth for services such as Plex or Jellyfin. |
 | `YARR_HTTP_TIMEOUT_SECS` | Per-request upstream timeout in seconds (default `30`). Raise for stacks with slow upstreams (e.g. a Prowlarr `/indexer` read that fans out to many trackers). `0`/unparseable falls back to `30`. |
 | `YARR_HOME` | Runtime data root. Defaults to `/data` in a container and `~/.yarr` otherwise. |
+| `YARR_FLEET_READONLY` | Comma-separated configured instance names that reject every mutating action on every transport. Unknown names fail startup. |
 
 ## MCP HTTP server
 
@@ -54,7 +62,10 @@ The template uses `YARR_*` variables. Rename the prefix when adapting the templa
 | `YARR_MCP_TOOL_MODE` | `codemode` | `codemode` or `flat`. See [CONFIG.md](CONFIG.md) for the tradeoff. |
 | `YARR_MCP_CODEMODE_MAX_CONCURRENT` | `4` | Maximum active Code Mode runtimes. |
 | `YARR_MCP_CODEMODE_QUEUE_TIMEOUT_MS` | `500` | Admission wait in milliseconds before returning busy. |
-| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `30` | Per-run Code Mode execution deadline. |
+| `YARR_MCP_CODEMODE_TIMEOUT_SECS` | `120` | Per-run execution and mutation-admission deadline. Already-dispatched writes drain to a receipt; queued writes become `not_dispatched`. |
+| `YARR_MCP_DESTRUCTIVE_FANOUT_MAX` | `3` | Hard maximum instance count for one destructive fleet call. Larger calls fail closed and must be targeted in smaller groups. |
+| `YARR_FLEET_MAX_CONCURRENT` | `8` | Bounded concurrency for one host-backed `fleet.map`. |
+| `YARR_FLEET_INSTANCE_TIMEOUT_SECS` | `8` | Per-instance read deadline; one timeout becomes `ok:false`. Writes are not cancelled after dispatch and report `confirmed`, `indeterminate`, or `not_dispatched`. |
 
 ## OAuth mode
 
@@ -94,6 +105,8 @@ Only required when `YARR_MCP_AUTH_MODE=oauth`:
 ```bash
 # .env — secrets and URLs ONLY
 YARR_SERVICES=sonarr,radarr,plex
+# Optional reviewable topology file; secrets referenced by it remain below.
+# YARR_FLEET_FILE=/data/fleet.yaml
 YARR_SONARR_URL=https://sonarr.internal
 YARR_SONARR_API_KEY=your_sonarr_key_here
 YARR_RADARR_URL=https://radarr.internal

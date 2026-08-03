@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use reqwest::StatusCode;
 use serde_json::Value;
+use std::time::Instant;
 
 use super::{MAX_UPSTREAM_RESPONSE_BYTES, UpstreamError, YarrClient, helpers};
 use crate::config::{ServiceConfig, ServiceKind};
@@ -15,6 +16,21 @@ pub(super) enum ResponseMode {
         expected_encoding: crate::openapi::BodyEncoding,
         expected_media_type: String,
     },
+}
+
+#[derive(Clone)]
+pub(super) struct RequestSummary {
+    method: String,
+    path: String,
+}
+
+impl RequestSummary {
+    pub(super) fn new(method: &reqwest::Method, url: &reqwest::Url) -> Self {
+        Self {
+            method: method.as_str().to_owned(),
+            path: url.path().to_owned(),
+        }
+    }
 }
 
 impl YarrClient {
@@ -30,8 +46,9 @@ impl YarrClient {
         &self,
         service: &ServiceConfig,
         request: reqwest::RequestBuilder,
+        summary: RequestSummary,
     ) -> Result<Value> {
-        self.finish_with_retry_mode(service, request, ResponseMode::JsonCompatible)
+        self.finish_with_retry_mode(service, request, summary, ResponseMode::JsonCompatible)
             .await
     }
 
@@ -39,11 +56,15 @@ impl YarrClient {
         &self,
         service: &ServiceConfig,
         request: reqwest::RequestBuilder,
+        summary: RequestSummary,
         mode: ResponseMode,
     ) -> Result<Value> {
         if service.kind == ServiceKind::Qbittorrent {
             match request.try_clone() {
-                Some(retry) => match self.finish(service, request, mode.clone()).await {
+                Some(retry) => match self
+                    .finish(service, request, summary.clone(), mode.clone())
+                    .await
+                {
                     Err(err) if is_auth_failure(&err) => {
                         let session = self.qbit_session(service)?;
                         session.invalidate().await;
@@ -55,7 +76,7 @@ impl YarrClient {
                         )
                         .increment(1);
                         relogin?;
-                        return self.finish(service, retry, mode).await;
+                        return self.finish(service, retry, summary, mode).await;
                     }
                     result => return result,
                 },
@@ -66,19 +87,21 @@ impl YarrClient {
                 ),
             }
         }
-        self.finish(service, request, mode).await
+        self.finish(service, request, summary, mode).await
     }
 
     async fn finish(
         &self,
         service: &ServiceConfig,
         request: reqwest::RequestBuilder,
+        summary: RequestSummary,
         mode: ResponseMode,
     ) -> Result<Value> {
+        let mut metric = UpstreamCallMetric::new(service, summary);
         let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
-                record_outcome(service, "transport_error");
+                metric.complete("transport_error");
                 return Err(error).with_context(|| format!("{} request failed", service.name));
             }
         };
@@ -91,7 +114,7 @@ impl YarrClient {
         if let Some(content_length) = response.content_length()
             && content_length > MAX_UPSTREAM_RESPONSE_BYTES as u64
         {
-            record_outcome(service, "oversized");
+            metric.complete("oversized");
             return Err(too_large(service, content_length));
         }
         let mut bytes = Vec::with_capacity(
@@ -100,13 +123,16 @@ impl YarrClient {
                 .unwrap_or(0)
                 .min(MAX_UPSTREAM_RESPONSE_BYTES as u64) as usize,
         );
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .with_context(|| format!("{} response body read failed", service.name))?
-        {
+        while let Some(chunk) = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                metric.complete("body_error");
+                return Err(error)
+                    .with_context(|| format!("{} response body read failed", service.name));
+            }
+        } {
             if bytes.len().saturating_add(chunk.len()) > MAX_UPSTREAM_RESPONSE_BYTES {
-                record_outcome(service, "oversized");
+                metric.complete("oversized");
                 return Err(too_large(
                     service,
                     bytes.len().saturating_add(chunk.len()) as u64,
@@ -115,7 +141,7 @@ impl YarrClient {
             bytes.extend_from_slice(&chunk);
         }
         if !status.is_success() {
-            record_outcome(service, "http_error");
+            metric.complete("http_error");
             let text = std::str::from_utf8(&bytes).unwrap_or("<non-utf8 body>");
             return Err(UpstreamError::Http {
                 service: service.name.clone(),
@@ -125,15 +151,20 @@ impl YarrClient {
             }
             .into());
         }
-        record_outcome(service, "success");
-        decode_success(
+        let decoded = decode_success(
             service,
             status,
             content_type,
             content_disposition,
             bytes,
             mode,
-        )
+        );
+        metric.complete(if decoded.is_ok() {
+            "success"
+        } else {
+            "decode_error"
+        });
+        decoded
     }
 }
 
@@ -145,14 +176,67 @@ fn header(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Op
         .map(str::to_owned)
 }
 
-fn record_outcome(service: &ServiceConfig, outcome: &'static str) {
-    axum_prometheus::metrics::counter!(
-        "yarr_upstream_requests_total",
-        "service" => service.name.clone(),
-        "kind" => service.kind.as_str(),
-        "outcome" => outcome
-    )
-    .increment(1);
+struct UpstreamCallMetric {
+    service: String,
+    kind: &'static str,
+    method: String,
+    path: String,
+    started: Instant,
+    outcome: &'static str,
+    completed: bool,
+}
+
+impl UpstreamCallMetric {
+    fn new(service: &ServiceConfig, request: RequestSummary) -> Self {
+        Self {
+            service: service.name.clone(),
+            kind: service.kind.as_str(),
+            method: request.method,
+            path: request.path,
+            started: Instant::now(),
+            outcome: "cancelled",
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+        self.completed = true;
+    }
+}
+
+impl Drop for UpstreamCallMetric {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        let outcome = if self.completed {
+            self.outcome
+        } else {
+            "cancelled"
+        };
+        axum_prometheus::metrics::counter!(
+            "yarr_upstream_requests_total",
+            "service" => self.service.clone(),
+            "kind" => self.kind,
+            "outcome" => outcome
+        )
+        .increment(1);
+        axum_prometheus::metrics::histogram!(
+            "yarr_upstream_request_duration_seconds",
+            "service" => self.service.clone(),
+            "kind" => self.kind,
+            "outcome" => outcome
+        )
+        .record(elapsed.as_secs_f64());
+        tracing::info!(
+            service = %self.service,
+            kind = self.kind,
+            method = %self.method,
+            path = %self.path,
+            outcome,
+            latency_ms = elapsed.as_millis(),
+            "upstream request completed"
+        );
+    }
 }
 
 fn too_large(service: &ServiceConfig, observed: u64) -> anyhow::Error {

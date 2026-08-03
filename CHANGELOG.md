@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add CLI/Code Mode fleet status, per-instance upstream latency histograms, and
+  structured instance fields on every upstream completion log.
+- Add bounded, failure-isolated `fleet.map`/`fleet.status` Code Mode primitives
+  and four immutable canonical fleet snippets.
+- Add review-only `yarr discover plex` scaffolding with owned-server defaults,
+  identifier-pinned drift detection, private token output, and Tautulli pairing.
+- Scale the Code Mode deadline for fleet workloads and preserve per-instance
+  truncation signals instead of silently cutting a multi-server result.
+
 ### Changed
 
 * **deps:** pin `rmcp` to an exact `=3.0.0-beta.2` (was a caret `"2.1.0"` that had already drifted to `2.2.0` in the lockfile). `ServerHandler::call_tool`/`read_resource`/`get_prompt` now return the `CallToolResponse`/`ReadResourceResponse`/`GetPromptResponse` wrappers, and `StreamableHttpServerConfig::with_stateful_mode` is now `with_legacy_session_mode`; both are behaviour-preserving. The elicitation API is unchanged, so destructive-delete gating stays fail-closed
@@ -46,12 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* **config:** load additive YAML/TOML fleets through `YARR_FLEET_FILE` with strict environment-only secret indirection and environment-over-file precedence
+* **safety:** classify high-impact generated operations explicitly, elicit non-DELETE Plex session/library mutations, cap destructive fleet targets, and support per-instance `YARR_FLEET_READONLY`
 * **docs:** add role-based navigation, safe multi-path quickstarts, complete Unraid settings/GraphQL/recovery coverage, and a tracked Markdown link/anchor CI guard
 * **unraid:** add canonical settings/dashboard routes, original Yarr artwork, a persistent dashboard toggle, and a compact freshness-aware runtime widget
 * **auth:** add configurable static bearer scopes (`YARR_MCP_STATIC_TOKEN_SCOPES`) and fail closed when Code Mode is served by a read-only static bearer
 
 ### Fixed
 
+* **config:** reject reserved Code Mode service names and normalized environment-namespace collisions at startup instead of silently hiding a service
 * **docs:** replace unpinned npm launcher guidance with exact-version availability checks and document the `v2.1.0` partial-release recovery boundary
 * **unraid:** enforce cache-busted page assets and canonical root-owned mode-0755 package directories
 * **auth:** honor explicit bearer/OAuth credentials on loopback binds instead of silently downgrading them to unauthenticated dev mode

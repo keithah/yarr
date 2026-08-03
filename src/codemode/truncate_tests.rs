@@ -126,3 +126,77 @@ fn utf8_prefix_never_splits_a_codepoint() {
         assert!(std::str::from_utf8(p.as_bytes()).is_ok());
     }
 }
+
+#[test]
+fn oversized_fleet_values_are_marked_per_instance() {
+    let huge = "x".repeat(RESPONSE_BUDGET);
+    let mut env = envelope(
+        json!([
+            {"name": "plex_01", "ok": true, "value": {"sessions": [huge]}},
+            {"name": "plex_02", "ok": true, "value": {"sessions": ["small"]}},
+        ]),
+        vec![],
+    );
+
+    fit_response(&mut env);
+
+    let results = env["result"]
+        .as_array()
+        .expect("fleet result remains an array");
+    assert_eq!(results[0]["name"], "plex_01");
+    assert_eq!(results[0]["truncated"], true);
+    assert_eq!(results[0]["value"], Value::Null);
+    assert_eq!(results[0]["summary"]["type"], "object");
+    assert!(results[0]["summary"]["original_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(results[1]["name"], "plex_02");
+    assert_eq!(results[1]["truncated"], false);
+    assert_eq!(results[1]["value"]["sessions"][0], "small");
+    assert!(serialized_len(&env) <= RESPONSE_BUDGET);
+}
+
+#[test]
+fn fleet_array_summary_reports_item_count() {
+    let sessions: Vec<Value> = (0..2_000)
+        .map(|i| json!({"session": i, "title": "x".repeat(32)}))
+        .collect();
+    let mut env = envelope(
+        json!([{"name": "plex_den", "ok": true, "value": sessions}]),
+        vec![],
+    );
+
+    fit_response(&mut env);
+
+    assert_eq!(env["result"][0]["truncated"], true);
+    assert_eq!(env["result"][0]["summary"]["item_count"], 2_000);
+}
+
+#[test]
+fn artifact_receipts_are_trimmed_without_triggering_transport_truncation() {
+    let artifacts = (0..64)
+        .map(|index| {
+            json!({
+                "path": format!("{index:02}-{}.json", "x".repeat(1024)),
+                "ok": true,
+                "error": null,
+                "delivered": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut env = json!({
+        "result": {"ok": true},
+        "calls": [],
+        "logs": [],
+        "artifacts": artifacts,
+    });
+    assert!(serialized_len(&env) > RESPONSE_BUDGET);
+
+    fit_response(&mut env);
+
+    assert!(serialized_len(&env) <= RESPONSE_BUDGET);
+    assert_eq!(env["result"], json!({"ok": true}));
+    assert!(
+        env["artifacts"][0]["truncated_artifacts"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+}

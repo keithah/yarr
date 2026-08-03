@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod auth;
 mod environment;
+mod fleet_file;
 pub mod mcp;
 pub mod services;
 
@@ -30,7 +31,19 @@ pub(crate) use environment::env_value;
 pub(crate) use environment::install_plugin_env_overlay;
 use environment::{EnvOverlayGuard, load_env_overlay};
 use mcp::{env_bool, env_list, env_opt_str, env_parse, env_str};
-use services::{SERVICE_HOME_DIRNAME, load_services_from_env};
+use services::{
+    SERVICE_HOME_DIRNAME, apply_readonly_services, load_services_from_env,
+    validate_service_identities,
+};
+
+#[cfg(test)]
+pub(crate) use fleet_file::FleetFormat;
+#[cfg(test)]
+pub(crate) use fleet_file::merge_service_sources;
+
+#[cfg(test)]
+#[path = "config/fleet_file_tests.rs"]
+mod fleet_file_tests;
 
 /// Top-level config (maps to `config.toml` sections).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -84,6 +97,8 @@ impl Config {
 
         let _overlay = EnvOverlayGuard::install(load_env_overlay()?);
 
+        let fleet_path = env_value("YARR_FLEET_FILE").filter(|path| !path.is_empty());
+
         // Env overrides — YARR_MCP_* for server config.
         env_str("YARR_MCP_HOST", &mut config.mcp.host);
         env_parse("YARR_MCP_PORT", &mut config.mcp.port)?;
@@ -108,6 +123,18 @@ impl Config {
         env_parse(
             "YARR_MCP_CODEMODE_TIMEOUT_SECS",
             &mut config.mcp.codemode_timeout_secs,
+        )?;
+        env_parse(
+            "YARR_MCP_DESTRUCTIVE_FANOUT_MAX",
+            &mut config.mcp.destructive_fanout_max,
+        )?;
+        env_parse(
+            "YARR_FLEET_MAX_CONCURRENT",
+            &mut config.mcp.fleet_max_concurrent,
+        )?;
+        env_parse(
+            "YARR_FLEET_INSTANCE_TIMEOUT_SECS",
+            &mut config.mcp.fleet_instance_timeout_secs,
         )?;
         env_opt_str("YARR_MCP_PUBLIC_URL", &mut config.mcp.auth.public_url);
         env_str(
@@ -186,6 +213,16 @@ impl Config {
         }
 
         load_services_from_env(&mut config.yarr)?;
+        if let Some(path) = fleet_path {
+            config.yarr.services = fleet_file::load_fleet_file_with_overrides(
+                std::path::Path::new(&path),
+                std::mem::take(&mut config.yarr.services),
+            )?;
+        }
+        if let Some(readonly) = env_value("YARR_FLEET_READONLY") {
+            apply_readonly_services(&mut config.yarr.services, &readonly)?;
+        }
+        validate_service_identities(&config.yarr.services)?;
 
         if config.mcp.static_token_scopes.is_empty() {
             anyhow::bail!("YARR_MCP_STATIC_TOKEN_SCOPES must contain at least one scope");
@@ -205,6 +242,15 @@ impl Config {
         }
         if config.mcp.codemode_queue_timeout_ms == 0 || config.mcp.codemode_timeout_secs == 0 {
             anyhow::bail!("Code Mode queue and execution timeouts must be greater than zero");
+        }
+        if config.mcp.destructive_fanout_max == 0 {
+            anyhow::bail!("YARR_MCP_DESTRUCTIVE_FANOUT_MAX must be at least 1");
+        }
+        if config.mcp.fleet_max_concurrent == 0 {
+            anyhow::bail!("YARR_FLEET_MAX_CONCURRENT must be at least 1");
+        }
+        if config.mcp.fleet_instance_timeout_secs == 0 {
+            anyhow::bail!("YARR_FLEET_INSTANCE_TIMEOUT_SECS must be at least 1");
         }
 
         Ok(config)
