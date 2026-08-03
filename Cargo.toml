@@ -25,10 +25,10 @@ invalid_rust_codeblocks = "deny"
 bare_urls = "warn"
 unescaped_backticks = "warn"
 redundant_explicit_links = "warn"
+missing_crate_level_docs = "deny"
 
 [workspace.lints.rust]
 missing_docs = "allow"
-missing_crate_level_docs = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
