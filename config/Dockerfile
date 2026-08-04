@@ -8,10 +8,11 @@
 # =============================================================================
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
-# Builder uses Rust 1.97 (>= the declared MSRV of 1.90). The multi-platform
-# manifest digest was resolved from Docker Hub on 2026-07-16; Dependabot should
-# propose deliberate digest refreshes.
-FROM rust:1.97-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS builder
+# Builder uses the exact declared MSRV. Pinning the patch release matters:
+# rust:1.97 currently resolves to rustc 1.97.0, while Cargo.toml requires
+# rustc 1.97.1. The amd64 manifest digest was resolved from Docker Hub on
+# 2026-08-04; Dependabot should propose deliberate digest refreshes.
+FROM rust:1.97.1-slim-bookworm@sha256:b001fed8c602fe3126bfee18c7afa14fe58dc855ce1d0cdfb4ac3ee7d6361a1c AS builder
 
 WORKDIR /app
 
