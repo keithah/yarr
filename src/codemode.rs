@@ -44,9 +44,9 @@ pub use semantic::{SemanticCache, semantic_scores, tei_url};
 /// Render a configured service name as its stable JavaScript namespace.
 ///
 /// Dispatch retains the original configured identity; this name exists only in
-/// the public Code Mode API and discovery catalog. Configuration rejects
-/// environment-namespace collisions, so `-` and `_` cannot produce ambiguous
-/// live service identities.
+/// the public Code Mode API and discovery catalog. Configuration validation
+/// rejects collisions, so `-` and `_` cannot produce ambiguous live service
+/// identities.
 pub fn javascript_namespace(service_name: &str) -> String {
     service_name.replace('-', "_")
 }

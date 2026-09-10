@@ -131,7 +131,8 @@ async fn codemode_discovery_paths_execute_for_hyphenated_service_names() {
         async () => {
             const hit = codemode.search("service status").results
                 .find((entry) => entry.path === "home_media.service_status");
-            if (!hit) return { found: false };
+            const responseType = codemode.describe("home_media.SeriesResource");
+            if (!hit || !responseType) return { found: false };
             try {
                 await home_media.service_status();
             } catch (_) {
