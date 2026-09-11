@@ -28,7 +28,7 @@ Configuration can come from `config.toml`, environment variables, or `.env` file
 | `YARR_MCP_DESTRUCTIVE_FANOUT_MAX` | `3` | Maximum distinct services covered by one destructive MCP authorization; must be at least 1 |
 | `YARR_FLEET_READONLY` | `false` | Reject every MCP mutation before upstream dispatch; accepts `true`/`false`, `yes`/`no`, or `1`/`0` |
 
-For a Code Mode script that reaches a destructive action, yarr constructs one conservative authorization set from every configured service before it elicits. If that configured fleet exceeds `YARR_MCP_DESTRUCTIVE_FANOUT_MAX`, no prompt or destructive dispatch occurs. A successful confirmation is retained only for that script run.
+For a Code Mode script that reaches destructive actions, yarr derives a conservative authorization set from the destructive service targets reached by its execution plan before it elicits. If that target set exceeds `YARR_MCP_DESTRUCTIVE_FANOUT_MAX`, no prompt or destructive dispatch occurs. A successful confirmation authorizes only those targets for that script run.
 
 ## Unauthenticated endpoints
 
