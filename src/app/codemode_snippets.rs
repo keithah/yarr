@@ -20,9 +20,12 @@ impl YarrService {
 
     pub async fn snippet_list(&self) -> Result<Value> {
         let result = (|| {
-            let dir = self.snippet_store_root()?;
-            let mut snippets =
-                codemode::store::list(&dir).map_err(|error| anyhow::anyhow!("{error}"))?;
+            let mut snippets = match self.data_dir() {
+                Some(dir) => {
+                    codemode::store::list(dir).map_err(|error| anyhow::anyhow!("{error}"))?
+                }
+                None => Vec::new(),
+            };
             snippets.extend(crate::fleet::snippets::builtins().iter().map(|snippet| {
                 codemode::store::SnippetMeta {
                     name: snippet.name.to_owned(),

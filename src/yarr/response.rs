@@ -121,11 +121,14 @@ impl YarrClient {
                 .unwrap_or(0)
                 .min(MAX_UPSTREAM_RESPONSE_BYTES as u64) as usize,
         );
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .with_context(|| format!("{} response body read failed", service.name))?
-        {
+        while let Some(chunk) = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                record_outcome(service, "body_read_error", started.elapsed());
+                return Err(error)
+                    .with_context(|| format!("{} response body read failed", service.name));
+            }
+        } {
             if bytes.len().saturating_add(chunk.len()) > MAX_UPSTREAM_RESPONSE_BYTES {
                 record_outcome(service, "oversized", started.elapsed());
                 return Err(too_large(
@@ -166,7 +169,11 @@ fn header(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Op
         .map(str::to_owned)
 }
 
-fn record_outcome(service: &ServiceConfig, outcome: &'static str, elapsed: std::time::Duration) {
+pub(super) fn record_outcome(
+    service: &ServiceConfig,
+    outcome: &'static str,
+    elapsed: std::time::Duration,
+) {
     axum_prometheus::metrics::counter!(
         "yarr_upstream_requests_total",
         "service" => service.name.clone(),

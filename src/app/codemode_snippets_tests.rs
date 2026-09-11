@@ -171,14 +171,41 @@ async fn snippet_cannot_run_another_snippet() {
 }
 
 #[tokio::test]
-async fn snippets_are_disabled_without_data_dir() {
+async fn builtins_work_without_data_dir_but_persistence_remains_unavailable() {
+    let service = loopback_state().service;
+    let listed = service.snippet_list().await.unwrap();
+    let names = listed["snippets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|snippet| snippet["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "fleet_activity",
+            "fleet_health",
+            "fleet_library_sizes",
+            "fleet_transcode_load"
+        ]
+    );
     assert!(
-        loopback_state()
-            .service
+        service
+            .snippet_run("fleet_health", &serde_json::Value::Null)
+            .await
+            .unwrap()["result"]
+            .is_array()
+    );
+    for operation in [
+        service
             .snippet_save("x", "async () => 1", None)
             .await
-            .is_err()
-    );
+            .map(|_| ()),
+        service.snippet_delete("x").await.map(|_| ()),
+    ] {
+        let error = operation.unwrap_err().to_string();
+        assert!(error.contains("no data dir"), "{error}");
+    }
 }
 
 #[tokio::test]
