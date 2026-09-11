@@ -19,6 +19,7 @@ use rmcp::{ServiceExt, transport::stdio};
 use tokio::runtime::Builder;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
+use yarr::fleet::discovery::{PlexDiscoveryOptions, discover_plex};
 use yarr::{
     AppState, AuthPolicy, AuthPolicyKind, Command, Config, READ_SCOPE, RunMode, WRITE_SCOPE,
     YarrClient, YarrService, acquire_oauth_instance_lock, apply_plugin_options, cli_usage,
@@ -166,6 +167,23 @@ async fn run_cli(config: Config) -> Result<()> {
             run_watch(&base, interval, once).await
         }
         Some(Command::Setup(command)) => run_setup(&config, command).await,
+        Some(Command::DiscoverPlex {
+            token_env,
+            fleet_file,
+            secret_file,
+            include_shared,
+            diff,
+        }) => {
+            let report = discover_plex(PlexDiscoveryOptions {
+                token_env,
+                fleet_file,
+                secret_file,
+                include_shared,
+                diff,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Some(cmd) => run_cli_command(cmd, &config.yarr).await,
         None => {
             eprintln!("Unknown command. Run `yarr --help` for usage.");

@@ -102,6 +102,28 @@ reference names public; put fleet credential values only in the environment over
 Literal credential fields in `config.toml` remain literal and are never treated as
 fleet reference names, even when `YARR_FLEET_FILE` is enabled.
 
+## Supervised Plex discovery
+
+`yarr discover plex` is an explicit, read-only **CLI-only** operator workflow. It
+is not available through MCP, Code Mode, server routes, or normal service request
+paths. It contacts plex.tv only when an operator invokes it with a token reference:
+
+```sh
+yarr discover plex --token-env PLEX_DISCOVERY_TOKEN \
+  --fleet-file ./fleet.yaml --secret-file ./plex.env --diff
+```
+
+Discovery defaults to owned Plex Media Servers. `--include-shared` opts in to
+shared servers. It ranks usable connections local first, then direct HTTPS, then
+relay; relay-only selections are reported. `--diff` reports typed added, removed,
+renamed, URL, and relay-state drift and writes neither target.
+
+The fleet YAML contains only public service metadata (`name`, `kind`, `base_url`,
+and `token_env`). The separate secret env file is atomically written at mode
+`0600`; do not commit it. Discovery output and logs never include the token or an
+authenticated URL. Run live discovery only with explicit supervision and
+read-only credentials; fixture coverage does not substitute for live acceptance.
+
 ## Auth Policy
 
 | State | Condition | Behavior |

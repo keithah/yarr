@@ -25,6 +25,7 @@ mod capability;
 mod cli;
 mod codemode;
 mod config;
+pub mod fleet;
 pub(crate) mod logging;
 mod mcp;
 pub mod models;
