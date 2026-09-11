@@ -392,26 +392,76 @@ static TEST_CURATED_COMMAND: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
-static TEST_CURATED_COMMAND_INSTALLATION: std::sync::OnceLock<std::sync::Mutex<()>> =
-    std::sync::OnceLock::new();
+struct TestCuratedCommandInstallationState {
+    active: bool,
+    waiters: usize,
+}
+
+#[cfg(test)]
+static TEST_CURATED_COMMAND_INSTALLATION: std::sync::OnceLock<(
+    std::sync::Mutex<TestCuratedCommandInstallationState>,
+    std::sync::Condvar,
+)> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct TestCuratedCommandInstallationGuard;
+
+#[cfg(test)]
+impl Drop for TestCuratedCommandInstallationGuard {
+    fn drop(&mut self) {
+        let (state, waiters) = TEST_CURATED_COMMAND_INSTALLATION
+            .get()
+            .expect("test curated command installation state must exist");
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.active,
+            "test curated command installation must be active"
+        );
+        state.active = false;
+        waiters.notify_all();
+    }
+}
 
 #[cfg(test)]
 pub(crate) struct TestCuratedCommandRegistration {
     name: &'static str,
-    _installation_guard: std::sync::MutexGuard<'static, ()>,
+    _installation_guard: TestCuratedCommandInstallationGuard,
 }
 
 #[cfg(test)]
 pub(crate) fn install_test_curated_command(
     command: CommandDescriptor,
 ) -> TestCuratedCommandRegistration {
-    let installation_lock =
-        TEST_CURATED_COMMAND_INSTALLATION.get_or_init(|| std::sync::Mutex::new(()));
-    let installation_guard = installation_lock
+    let (state, waiters) = TEST_CURATED_COMMAND_INSTALLATION.get_or_init(|| {
+        (
+            std::sync::Mutex::new(TestCuratedCommandInstallationState {
+                active: false,
+                waiters: 0,
+            }),
+            std::sync::Condvar::new(),
+        )
+    });
+    let mut installation = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while installation.active {
+        installation.waiters += 1;
+        waiters.notify_all();
+        installation = waiters
+            .wait(installation)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        installation.waiters -= 1;
+    }
+    installation.active = true;
+    drop(installation);
+
+    let installation_guard = TestCuratedCommandInstallationGuard;
     let slot = TEST_CURATED_COMMAND.get_or_init(|| std::sync::Mutex::new(None));
-    let mut slot = slot.lock().expect("test curated command lock poisoned");
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
         slot.is_none(),
         "only one test curated command may be installed"
@@ -425,10 +475,28 @@ pub(crate) fn install_test_curated_command(
 }
 
 #[cfg(test)]
-fn test_curated_command(name: &str) -> Option<&'static CommandDescriptor> {
-    let command = TEST_CURATED_COMMAND
+pub(crate) fn wait_for_test_curated_command_installation_waiter() {
+    let (state, waiters) = TEST_CURATED_COMMAND_INSTALLATION
         .get()
-        .and_then(|slot| slot.lock().ok().and_then(|slot| *slot))?;
+        .expect("test curated command installation state must exist");
+    let mut installation = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while installation.waiters == 0 {
+        installation = waiters
+            .wait(installation)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+#[cfg(test)]
+fn test_curated_command(name: &str) -> Option<&'static CommandDescriptor> {
+    let command = TEST_CURATED_COMMAND.get().and_then(|slot| {
+        let slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot
+    })?;
     (command.name == name).then_some(command)
 }
 
@@ -438,7 +506,9 @@ impl Drop for TestCuratedCommandRegistration {
         let slot = TEST_CURATED_COMMAND
             .get()
             .expect("test curated command slot must exist");
-        let mut slot = slot.lock().expect("test curated command lock poisoned");
+        let mut slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(slot.as_ref().map(|command| command.name), Some(self.name));
         *slot = None;
     }

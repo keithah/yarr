@@ -127,7 +127,6 @@ fn test_curated_registration_serializes_parallel_installers() {
 
     let (first_installed_tx, first_installed_rx) = std::sync::mpsc::channel();
     let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
-    let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
     let (second_finished_tx, second_finished_rx) = std::sync::mpsc::channel();
 
     std::thread::scope(|scope| {
@@ -140,7 +139,6 @@ fn test_curated_registration_serializes_parallel_installers() {
 
         first_installed_rx.recv().unwrap();
         let second = scope.spawn(move || {
-            second_started_tx.send(()).unwrap();
             let result = std::panic::catch_unwind(|| {
                 drop(install_test_curated_command(test_command(
                     "second_parallel_test",
@@ -149,18 +147,11 @@ fn test_curated_registration_serializes_parallel_installers() {
             second_finished_tx.send(result.is_ok()).unwrap();
         });
 
-        second_started_rx.recv().unwrap();
-        let second_waited_for_first_drop = second_finished_rx
-            .recv_timeout(std::time::Duration::from_millis(100))
-            .is_err();
+        wait_for_test_curated_command_installation_waiter();
         release_first_tx.send(()).unwrap();
         first.join().unwrap();
         let second_succeeded = second_finished_rx.recv().unwrap();
         second.join().unwrap();
-        assert!(
-            second_waited_for_first_drop,
-            "the second installer must wait until the first registration drops"
-        );
         assert!(second_succeeded);
     });
 }

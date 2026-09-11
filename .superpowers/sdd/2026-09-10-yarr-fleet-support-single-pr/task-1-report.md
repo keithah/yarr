@@ -100,3 +100,31 @@ Only `src/actions/registry.rs`, `src/actions/registry_tests.rs`, and this report
 ### Scope
 
 Only `src/actions/registry.rs`, `src/actions/registry_tests.rs`, and this Task 1 report changed. No network, live credentials, push, or PR actions were used.
+
+## Follow-up re-review repair — observable registration contention gate
+
+### Finding repaired
+
+The prior `second_started` channel fired immediately before the second installer call. It established thread scheduling but could not establish that the thread had acquired or blocked on the registration synchronization, so the completion timeout was not a proof of contention.
+
+### Strict TDD evidence
+
+1. Strengthened `test_curated_registration_serializes_parallel_installers` to wait for `wait_for_test_curated_command_installation_waiter()` before releasing the first registration; it no longer uses a pre-call signal or a timing assertion.
+2. **RED:** with the previous mutex-only registration design, the focused test did not compile because no installation path could atomically publish an actual waiter: `cannot find function wait_for_test_curated_command_installation_waiter in this scope`.
+3. Added a cfg(test)-only installation state guarded by `Mutex` + `Condvar`: `{ active, waiters }`. An installer increments `waiters` and notifies while holding that mutex, before its condition-variable wait. The observer waits for `waiters > 0`; registration teardown clears `active` and notifies all waiters.
+4. **GREEN:** the focused contention test passed after the observable gate was added. The existing panic-recovery test also passed; all test-only mutex/condvar acquisitions recover poisoning with `PoisonError::into_inner`, and slot cleanup remains RAII-driven.
+
+### Verification
+
+- Focused tests:
+  - `cargo test --lib actions::registry::tests::test_curated_registration_serializes_parallel_installers -- --exact --nocapture` — passed.
+  - `cargo test --lib actions::registry::tests::test_curated_registration_recovers_after_registered_test_panics -- --exact --nocapture` — passed.
+- `rustfmt --edition 2024 --check src/actions/registry.rs src/actions/registry_tests.rs` — passed.
+- `cargo test --lib` under default parallel configuration — 612 passed, 0 failed.
+- `cargo check` — passed.
+- `cargo clippy --all-targets -- -D warnings` — passed.
+- `git diff --check` — passed.
+
+### Scope
+
+Only cfg(test) registry synchronization and its contention test changed, plus this Task 1 report. Production registry lookup and `LocalEffect` behavior are unchanged; no network, credentials, push, or PR actions were used.
