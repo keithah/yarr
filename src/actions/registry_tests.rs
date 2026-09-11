@@ -18,6 +18,18 @@ fn generic_action_metadata_is_complete_and_authoritative() {
 use crate::config::ServiceKind;
 
 #[test]
+fn curated_commands_explicitly_report_no_yarr_local_filesystem_effect() {
+    for command in curated_commands() {
+        assert_eq!(
+            command.local_effect,
+            LocalEffect::None,
+            "{} is not authorized to create, download, cache, or update yarr-local files",
+            command.name
+        );
+    }
+}
+
+#[test]
 fn action_metadata_matches_yarr_surface() {
     assert_eq!(
         action_names(),

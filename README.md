@@ -139,7 +139,7 @@ release gates.
 
 ## Quickstart
 
-The first-screen 30-second path is:
+The minimal quickstart path is:
 
 ```bash
 export YARR_SERVICES=sonarr

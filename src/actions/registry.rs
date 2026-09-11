@@ -247,6 +247,16 @@ pub type CommandFuture<'a> =
 /// boxed future. Boxing cost is negligible for network-bound calls.
 pub type CommandHandler = for<'a> fn(&'a YarrService, &'a Value) -> CommandFuture<'a>;
 
+/// Local filesystem effect of a curated command, separately from upstream
+/// mutation authority. Every command must state this explicitly so a future
+/// downloader/cache/artifact writer cannot be advertised as read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalEffect {
+    /// The command does not create, download, cache, delete, or update files in
+    /// yarr's local filesystem.
+    None,
+}
+
 /// Static description of a curated, capability-scoped command. This is the SSOT
 /// from which schema fragments, USAGE/HELP text, scope, and validation are all
 /// derived (LD2).
@@ -273,6 +283,9 @@ pub struct CommandDescriptor {
     /// [`action_is_destructive`].
     pub destructive: bool,
     pub mutates: bool,
+    /// Audited yarr-local filesystem effect. This must agree with the command's
+    /// scope and mutation authority before a non-`None` effect is introduced.
+    pub local_effect: LocalEffect,
     /// The advertised JSON type of every param this command accepts
     /// (both required and optional), as `(param_name, ParamType)`.
     ///

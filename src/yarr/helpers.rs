@@ -50,6 +50,13 @@ pub async fn with_request_deadline<T>(
     ACTIVE_REQUEST_DEADLINE.scope(deadline, future).await
 }
 
+/// The Code Mode deadline attached to this async task, if the call originated
+/// from the Code Mode dispatcher. Ordinary CLI and MCP dispatch has no task-local
+/// deadline and retains its configured client timeout behavior.
+pub fn active_request_deadline() -> Option<RequestDeadline> {
+    ACTIVE_REQUEST_DEADLINE.try_with(|deadline| *deadline).ok()
+}
+
 #[cfg(test)]
 #[path = "helpers_tests.rs"]
 mod tests;

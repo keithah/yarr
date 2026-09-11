@@ -38,6 +38,16 @@ configured heap and stack limits for its runtime, but yarr runs QuickJS in-proce
 those limits are not process-level memory isolation. Use a process-isolated
 execution path when that stronger guarantee is required.
 
+### Local filesystem effects
+
+Curated service commands declare a local-filesystem effect in the action
+registry. The current curated commands all declare `None`: they do not create,
+download, cache, or update files in yarr's local data directory. A Task-1 source
+audit found no `pages.pull`, `pages_pull`, `page_pull`, or `pull_page` action in
+`src/`, and the only Code Mode artifact writer is `writeArtifact`, which remains
+behind the write-scoped Code Mode entry point. A future curated local writer must
+declare its effect and use write authority before it can dispatch.
+
 ## Service Catalog
 
 Set `YARR_SERVICES` to a comma-separated list of configured service names. Each service can then provide URL and credentials through prefixed variables:
