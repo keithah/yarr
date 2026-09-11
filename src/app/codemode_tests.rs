@@ -231,12 +231,9 @@ impl super::CodeModeCallGuard for PreflightRecordingGuard {
         Box::pin(async { Ok(()) })
     }
 
-    fn preflight<'a>(
+    fn authorize_planned_targets<'a>(
         &'a self,
-        _service: &'a crate::app::YarrService,
-        _code: &'a str,
-        _input_json: Option<&'a str>,
-        _limits: crate::codemode::EngineLimits,
+        _targets: Vec<String>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         let calls = std::sync::Arc::clone(&self.calls);
         Box::pin(async move {
@@ -280,12 +277,9 @@ impl super::CodeModeCallGuard for BlockingPreflightGuard {
         Box::pin(async { Ok(()) })
     }
 
-    fn preflight<'a>(
+    fn authorize_planned_targets<'a>(
         &'a self,
-        _service: &'a crate::app::YarrService,
-        _code: &'a str,
-        _input_json: Option<&'a str>,
-        _limits: crate::codemode::EngineLimits,
+        _targets: Vec<String>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         let _ = self.entered.send(());
         let release = self
@@ -339,4 +333,119 @@ async fn guarded_preflight_holds_the_codemode_admission_slot() {
 
     release_tx.send(()).expect("first preflight is waiting");
     first.await.unwrap().unwrap();
+}
+
+struct DataDependentPlanningGuard {
+    planned: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl super::CodeModeCallGuard for DataDependentPlanningGuard {
+    fn authorize<'a>(
+        &'a self,
+        _action: &'a crate::actions::YarrAction,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn planned_destructive_target(&self, action: &crate::actions::YarrAction) -> Option<String> {
+        match action {
+            crate::actions::YarrAction::ApiDelete { service, .. } => Some(service.to_owned()),
+            _ => None,
+        }
+    }
+
+    fn authorize_planned_targets<'a>(
+        &'a self,
+        targets: Vec<String>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let planned = std::sync::Arc::clone(&self.planned);
+        Box::pin(async move {
+            *planned.lock().expect("planned targets are available") = targets;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn guarded_codemode_plans_data_dependent_delete_after_real_read() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&requests);
+    let app = axum::Router::new().fallback(axum::routing::any(
+        move |request: axum::extract::Request| {
+            let observed = std::sync::Arc::clone(&observed);
+            async move {
+                observed.lock().unwrap().push(request.method().to_string());
+                axum::Json(serde_json::json!({ "items": [1] }))
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = crate::config::YarrConfig {
+        services: vec![crate::config::ServiceConfig {
+            name: "sonarr".to_owned(),
+            kind: crate::config::ServiceKind::Sonarr,
+            base_url: format!("http://{address}").parse().unwrap(),
+            api_key: Some("test".to_owned()),
+            ..Default::default()
+        }],
+    };
+    let client = crate::yarr::YarrClient::new(&config).unwrap();
+    let service = crate::app::YarrService::new(client, config);
+    let planned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let guard = std::sync::Arc::new(DataDependentPlanningGuard {
+        planned: std::sync::Arc::clone(&planned),
+    });
+
+    let result = service
+        .codemode_with_guard(
+            r#"async () => {
+                const x = await api.sonarr.get("/api/v3/series");
+                if (x.items.length) await api.sonarr.delete("/api/v3/series/1");
+                return x.items.length;
+            }"#,
+            guard,
+        )
+        .await;
+
+    assert_eq!(result.unwrap()["result"], 1);
+    assert_eq!(*planned.lock().unwrap(), vec!["sonarr"]);
+    assert_eq!(
+        *requests.lock().unwrap(),
+        vec!["GET", "GET", "DELETE"],
+        "planning dispatches the read but never a destructive request before confirmation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn guarded_planning_does_not_block_the_tokio_worker() {
+    let service = loopback_state().service.with_codemode_limits(
+        1,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(80),
+    );
+    let run = tokio::spawn(async move {
+        service
+            .codemode_with_guard(
+                "async () => { for (;;) {} }",
+                std::sync::Arc::new(PreflightRecordingGuard {
+                    calls: std::sync::Arc::new(std::sync::Mutex::new(0)),
+                }),
+            )
+            .await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::timeout(std::time::Duration::from_millis(20), async {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    })
+    .await
+    .expect("QuickJS planning must yield the sole Tokio worker");
+    assert!(
+        run.await.unwrap().is_err(),
+        "the bounded planning run times out"
+    );
 }

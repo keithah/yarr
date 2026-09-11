@@ -46,23 +46,36 @@ use runtime::{ActiveRunMetric, ArtifactRequest, EmbedRequest, ToolRequest};
 /// MCP-supplied defense-in-depth policy for every action emitted by a Code
 /// Mode script. CLI runs use no guard and retain their local-trust behavior.
 pub(crate) trait CodeModeCallGuard: Send + Sync {
-    /// Authorize the complete source before it reaches QuickJS. This runs after
-    /// Code Mode's input-size check and execution-slot admission, so planning
-    /// cannot bypass either bound.
-    fn preflight<'a>(
-        &'a self,
-        _service: &'a YarrService,
-        _code: &'a str,
-        _input_json: Option<&'a str>,
-        _limits: EngineLimits,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
-    }
-
     fn authorize<'a>(
         &'a self,
         action: &'a YarrAction,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Apply scope and readonly policy while planning. Implementations must not
+    /// require a destructive confirmation here because the target set is not
+    /// complete until the planning sandbox settles.
+    fn authorize_planning_action<'a>(
+        &'a self,
+        action: &'a YarrAction,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        self.authorize(action)
+    }
+
+    /// Return a target for a destructive action that the planning sandbox must
+    /// record instead of dispatching. `None` means the action is safe to route
+    /// normally during planning.
+    fn planned_destructive_target(&self, _action: &YarrAction) -> Option<String> {
+        None
+    }
+
+    /// Confirm the complete bounded set selected by planning before the real
+    /// script begins. The default keeps non-MCP guards behaviorally unchanged.
+    fn authorize_planned_targets<'a>(
+        &'a self,
+        _targets: Vec<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl YarrService {
@@ -131,8 +144,18 @@ impl YarrService {
             deadline: deadline.instant.into_std(),
         };
         if let Some(guard) = guard.as_ref() {
+            let targets = self
+                .plan_script_destructive_targets(
+                    &code,
+                    input_json.as_deref(),
+                    in_snippet,
+                    limits.clone(),
+                    std::sync::Arc::clone(guard),
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
             guard
-                .preflight(self, &code, input_json.as_deref(), limits.clone())
+                .authorize_planned_targets(targets)
                 .await
                 .map_err(anyhow::Error::msg)?;
         }
@@ -354,6 +377,105 @@ impl YarrService {
         // instead of letting the blunt transport cap slice it mid-JSON.
         crate::codemode::truncate::fit_response(&mut response);
         Ok(response)
+    }
+
+    /// Run the script's planning pass on the blocking Code Mode boundary. Reads
+    /// use the same guarded dispatcher as execution so their real values select
+    /// branches; destructive calls are parsed and recorded but return `null` and
+    /// never reach transport until the aggregate target set is confirmed.
+    async fn plan_script_destructive_targets(
+        &self,
+        code: &str,
+        input_json: Option<&str>,
+        in_snippet: bool,
+        limits: EngineLimits,
+        guard: std::sync::Arc<dyn CodeModeCallGuard>,
+    ) -> Result<Vec<String>, String> {
+        let preamble = self.codemode_preamble();
+        let code = code.to_owned();
+        let input_json = input_json.map(str::to_owned);
+        let deadline = crate::yarr::RequestDeadline {
+            instant: tokio::time::Instant::from_std(limits.deadline),
+        };
+        let (tx, mut rx) = mpsc::channel::<ToolRequest>(8);
+        let handle = tokio::task::spawn_blocking(move || {
+            codemode::plan_tool_calls_with_caller(
+                &code,
+                &preamble,
+                &limits,
+                input_json.as_deref(),
+                Box::new(move |id, params_json| {
+                    let (reply, receive) = oneshot::channel();
+                    tx.blocking_send(ToolRequest {
+                        id: id.to_owned(),
+                        params_json: params_json.to_owned(),
+                        deadline,
+                        reply,
+                    })
+                    .map_err(|_| "codemode planning dispatcher unavailable".to_owned())?;
+                    receive
+                        .blocking_recv()
+                        .map_err(|_| "codemode planning dispatch was dropped".to_owned())?
+                }),
+            )
+        });
+        let mut targets = std::collections::BTreeSet::new();
+        while let Some(request) = rx.recv().await {
+            let outcome = crate::yarr::helpers::with_request_deadline(
+                request.deadline,
+                tokio::time::timeout_at(
+                    request.deadline.instant,
+                    self.codemode_plan_dispatch(
+                        &request.id,
+                        &request.params_json,
+                        in_snippet,
+                        std::sync::Arc::clone(&guard),
+                        &mut targets,
+                    ),
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| Err("codemode absolute deadline exceeded".to_owned()));
+            let _ = request.reply.send(outcome);
+        }
+        handle
+            .await
+            .map_err(|error| format!("codemode planning task panicked: {error}"))??;
+        Ok(targets.into_iter().collect())
+    }
+
+    async fn codemode_plan_dispatch(
+        &self,
+        id: &str,
+        params_json: &str,
+        in_snippet: bool,
+        guard: std::sync::Arc<dyn CodeModeCallGuard>,
+        targets: &mut std::collections::BTreeSet<String>,
+    ) -> Result<String, String> {
+        if id == "codemode" {
+            return Err("codemode cannot invoke codemode".to_owned());
+        }
+        if in_snippet && id == "snippet_run" {
+            return Err(
+                "a snippet cannot run another snippet (codemode.run is one level deep)".to_owned(),
+            );
+        }
+        let mut args = match serde_json::from_str(params_json)
+            .map_err(|error| format!("invalid params for `{id}`: {error}"))?
+        {
+            Value::Object(args) => args,
+            _ => return Err(format!("params for `{id}` must be a JSON object")),
+        };
+        args.insert("action".to_owned(), Value::String(id.to_owned()));
+        let action =
+            YarrAction::from_mcp_args(&Value::Object(args)).map_err(|error| error.to_string())?;
+        guard.authorize_planning_action(&action).await?;
+        if let Some(target) = guard.planned_destructive_target(&action) {
+            targets.insert(target);
+            return Ok("null".to_owned());
+        }
+        self.codemode_dispatch(id, params_json, in_snippet, Some(guard))
+            .await
     }
 }
 

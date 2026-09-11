@@ -116,3 +116,39 @@ Mode tests passing. The added coverage proves an oversized guarded source never 
 preflight, a preflight retains the sole configured admission permit until it completes,
 a guarded saved snippet preflights its loaded source, and `codemode.run(...)` expands a
 saved destructive snippet to its actual `sonarr` target before authorization.
+
+## Follow-up repair: data-dependent planning and nonblocking QuickJS
+
+Null-only planning could not take a branch selected by an upstream read. Guarded
+planning now runs on the existing Code Mode blocking boundary, sends each
+non-destructive call through the normal guarded dispatcher, and returns its real
+JSON to QuickJS. Destructive calls are parsed, scope/readonly-checked, collected
+as exact targets, and return `null` without transport. The sorted/deduplicated
+set is capped and confirmed once before the actual script runs; runtime target
+enforcement remains in place. Planning uses the same admission permit and absolute
+deadline as execution, including deadline-aware read dispatch.
+
+### RED evidence
+
+```sh
+cargo test --lib app::codemode::tests::guarded_codemode_plans_data_dependent_delete_after_real_read -- --nocapture
+# exit 101: CodeModeCallGuard lacked the planning target/authorization hooks
+```
+
+### GREEN evidence
+
+```sh
+cargo fmt --check
+cargo test --lib app::codemode -- --nocapture
+cargo test --lib mcp::tools -- --nocapture
+cargo test --lib
+```
+
+All commands exited `0` on 2026-09-11. The focused integration regression uses a
+controlled local HTTP service and `const x = await api.sonarr.get(...)`; its
+nonempty response selects `api.sonarr.delete(...)`. It observes `GET, GET,
+DELETE`: the first GET is planning, no DELETE reaches transport before the target
+is recorded/authorized, and the second GET plus DELETE is actual execution. The
+single-worker regression proves an infinite-loop planning run yields Tokio while
+QuickJS runs on `spawn_blocking`; the run itself still terminates at the absolute
+deadline. The full library suite reported 627 passing tests.

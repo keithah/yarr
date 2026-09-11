@@ -13,20 +13,23 @@ impl super::super::CodeModeCallGuard for SourceRecordingGuard {
         Box::pin(async { Ok(()) })
     }
 
-    fn preflight<'a>(
+    fn planned_destructive_target(&self, action: &crate::actions::YarrAction) -> Option<String> {
+        match action {
+            crate::actions::YarrAction::ApiDelete { service, .. } => Some(service.to_owned()),
+            _ => None,
+        }
+    }
+
+    fn authorize_planned_targets<'a>(
         &'a self,
-        _service: &'a crate::app::YarrService,
-        code: &'a str,
-        _input_json: Option<&'a str>,
-        _limits: crate::codemode::EngineLimits,
+        targets: Vec<String>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         let sources = Arc::clone(&self.sources);
-        let code = code.to_owned();
         Box::pin(async move {
             sources
                 .lock()
                 .expect("preflight sources are available")
-                .push(code);
+                .extend(targets);
             Ok(())
         })
     }
@@ -157,5 +160,5 @@ async fn guarded_saved_snippet_preflights_its_loaded_source_before_execution() {
         )
         .await;
 
-    assert_eq!(*sources.lock().unwrap(), vec![source.to_owned()]);
+    assert_eq!(*sources.lock().unwrap(), vec!["sonarr"]);
 }

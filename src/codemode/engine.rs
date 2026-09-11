@@ -228,11 +228,32 @@ pub fn run(
 /// returning the call sequence the script actually reaches. Each call receives
 /// `null`, allowing independent sequential calls to be collected while making no
 /// upstream request or artifact write.
+#[cfg(test)]
 pub fn plan_tool_calls(
     user_code: &str,
     preamble: &str,
     limits: &EngineLimits,
     input_json: Option<&str>,
+) -> Result<Vec<PlannedToolCall>, String> {
+    plan_tool_calls_with_caller(
+        user_code,
+        preamble,
+        limits,
+        input_json,
+        Box::new(|_, _| Ok("null".to_owned())),
+    )
+}
+
+/// Execute the planning sandbox while routing each non-destructive call through
+/// `on_call`. The caller decides which calls may dispatch and supplies their real
+/// JSON results; destructive calls can therefore be recorded without transport
+/// while prior reads still drive data-dependent JavaScript branches.
+pub fn plan_tool_calls_with_caller(
+    user_code: &str,
+    preamble: &str,
+    limits: &EngineLimits,
+    input_json: Option<&str>,
+    on_call: ToolCaller,
 ) -> Result<Vec<PlannedToolCall>, String> {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&calls);
@@ -248,7 +269,7 @@ pub fn plan_tool_calls(
                     id: id.to_owned(),
                     params_json: params_json.to_owned(),
                 });
-            Ok("null".to_owned())
+            on_call(id, params_json)
         }),
         Box::new(|_, _, _| Ok("null".to_owned())),
         Box::new(|_| Ok("{}".to_owned())),

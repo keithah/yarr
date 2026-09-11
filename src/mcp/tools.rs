@@ -129,18 +129,33 @@ pub(crate) fn authorize_codemode_action_scopes(
 }
 
 impl CodeModeCallGuard for McpCodeModeGuard {
-    fn preflight<'a>(
+    fn authorize_planning_action<'a>(
         &'a self,
-        service: &'a crate::app::YarrService,
-        code: &'a str,
-        _input_json: Option<&'a str>,
-        limits: crate::codemode::EngineLimits,
+        action: &'a YarrAction,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let targets = codemode_script_destructive_targets_with_limits(
-                service,
-                code,
-                &limits,
+            if let Some(auth) = self.auth.as_ref() {
+                authorize_codemode_action_scopes(&auth.scopes, action)?;
+            }
+            reject_fleet_readonly_mutation(&self.state, action)
+        })
+    }
+
+    fn planned_destructive_target(&self, action: &YarrAction) -> Option<String> {
+        destructive_inner_call(&self.state, action).0.then(|| {
+            script_action_service(action)
+                .unwrap_or(YARR_TOOL_NAME)
+                .to_owned()
+        })
+    }
+
+    fn authorize_planned_targets<'a>(
+        &'a self,
+        targets: Vec<String>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let targets = super::rmcp_server::destructive_targets(
+                &targets,
                 self.state.config.destructive_fanout_max,
             )?;
             if targets.is_empty() {
@@ -227,6 +242,7 @@ pub(crate) fn codemode_script_destructive_targets(
     codemode_script_destructive_targets_with_limits(service, code, &limits, fanout_max)
 }
 
+#[cfg(test)]
 fn codemode_script_destructive_targets_with_limits(
     service: &crate::app::YarrService,
     code: &str,
@@ -273,6 +289,7 @@ fn codemode_script_destructive_targets_with_limits(
     super::rmcp_server::destructive_targets(&targets, fanout_max)
 }
 
+#[cfg(test)]
 fn destructive_script_action(service: &crate::app::YarrService, action: &YarrAction) -> bool {
     crate::actions::action_is_destructive(action.name())
         || matches!(action, YarrAction::Op { service: target, op, .. } if service

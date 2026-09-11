@@ -37,8 +37,11 @@ pub mod truncate;
 
 use std::time::Duration;
 
+#[cfg(test)]
+pub use engine::plan_tool_calls;
 pub use engine::{
-    ArtifactWriter, EmbedCaller, EngineLimits, EngineOutcome, ToolCaller, plan_tool_calls, run,
+    ArtifactWriter, EmbedCaller, EngineLimits, EngineOutcome, ToolCaller,
+    plan_tool_calls_with_caller, run,
 };
 pub use proxy::build_preamble;
 pub use semantic::{SemanticCache, semantic_scores, tei_url};
