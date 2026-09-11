@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const PLEX_RESOURCES_URL: &str = "https://plex.tv/api/resources";
 const PLEX_PRODUCT: &str = "yarr";
@@ -454,31 +454,64 @@ struct PublicFleetFile {
 #[derive(Serialize)]
 struct PublicFleetService {
     name: String,
-    kind: &'static str,
+    kind: String,
     client_identifier: String,
     base_url: String,
     token_env: String,
     relay_only: bool,
 }
+
+#[derive(Deserialize)]
+struct ExistingFleetFile {
+    services: Vec<ExistingFleetService>,
+}
+
+#[derive(Deserialize)]
+struct ExistingFleetService {
+    name: Option<String>,
+    kind: Option<String>,
+    client_identifier: Option<String>,
+    base_url: Option<String>,
+    token_env: Option<String>,
+    relay_only: Option<bool>,
+}
+
+fn serialize_public_fleet(fleet_file: &Path, public: &PublicFleetFile) -> Result<String> {
+    match fleet_file
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("yaml" | "yml") => Ok(serde_yaml_ng::to_string(public)?),
+        Some("toml") => Ok(toml::to_string_pretty(public)?),
+        _ => bail!(
+            "fleet file {} must use a .yaml, .yml, or .toml extension",
+            fleet_file.display()
+        ),
+    }
+}
+
 fn write_discovery_outputs(
     fleet_file: &Path,
     secret_file: &Path,
     report: &PlexDiscoveryReport,
 ) -> Result<()> {
-    let public = serde_yaml_ng::to_string(&PublicFleetFile {
-        services: report
-            .resources
-            .iter()
-            .map(|item| PublicFleetService {
-                name: item.name.clone(),
-                kind: "plex",
-                client_identifier: item.client_identifier.clone(),
-                base_url: item.base_url.clone(),
-                token_env: item.token_env.clone(),
-                relay_only: item.relay_only,
-            })
-            .collect(),
-    })?;
+    let public = serialize_public_fleet(
+        fleet_file,
+        &PublicFleetFile {
+            services: report
+                .resources
+                .iter()
+                .map(|item| PublicFleetService {
+                    name: item.name.clone(),
+                    kind: "plex".into(),
+                    client_identifier: item.client_identifier.clone(),
+                    base_url: item.base_url.clone(),
+                    token_env: item.token_env.clone(),
+                    relay_only: item.relay_only,
+                })
+                .collect(),
+        },
+    )?;
     let secret = report
         .resources
         .iter()
@@ -532,43 +565,43 @@ fn read_existing_report(path: &Path) -> Result<PlexDiscoveryReport> {
         return Ok(PlexDiscoveryReport::empty());
     }
     let contents = fs::read_to_string(path)?;
-    let parsed: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&contents).context("existing fleet file is not YAML")?;
-    let services = parsed
-        .get("services")
-        .and_then(serde_yaml_ng::Value::as_sequence)
-        .ok_or_else(|| anyhow!("existing fleet file must contain services"))?;
+    let parsed: ExistingFleetFile = match path.extension().and_then(|extension| extension.to_str())
+    {
+        Some("yaml" | "yml") => {
+            serde_yaml_ng::from_str(&contents).context("existing fleet file is not YAML")?
+        }
+        Some("toml") => toml::from_str(&contents).context("existing fleet file is not TOML")?,
+        _ => bail!(
+            "fleet file {} must use a .yaml, .yml, or .toml extension",
+            path.display()
+        ),
+    };
     let mut seen = BTreeSet::new();
     let mut resources = Vec::new();
-    for item in services {
-        let map = item
-            .as_mapping()
-            .ok_or_else(|| anyhow!("fleet service must be a mapping"))?;
-        let get = |key: &str| {
-            map.get(serde_yaml_ng::Value::String(key.into()))
-                .and_then(serde_yaml_ng::Value::as_str)
-                .map(str::to_owned)
-        };
-        if get("kind").as_deref() != Some("plex") {
+    for item in parsed.services {
+        if item.kind.as_deref() != Some("plex") {
             continue;
         }
-        let name = get("name").ok_or_else(|| anyhow!("Plex fleet service missing name"))?;
+        let name = item
+            .name
+            .ok_or_else(|| anyhow!("Plex fleet service missing name"))?;
         if !seen.insert(name.clone()) {
             bail!("duplicate Plex fleet service {name}");
         }
-        let relay_only = map
-            .get(serde_yaml_ng::Value::String("relay_only".into()))
-            .and_then(serde_yaml_ng::Value::as_bool)
-            .ok_or_else(|| anyhow!("Plex fleet service missing relay_only boolean"))?;
         resources.push(DiscoveredPlex {
-            client_identifier: get("client_identifier")
+            client_identifier: item
+                .client_identifier
                 .ok_or_else(|| anyhow!("Plex fleet service missing client_identifier"))?,
-            base_url: get("base_url")
+            base_url: item
+                .base_url
                 .ok_or_else(|| anyhow!("Plex fleet service missing base_url"))?,
-            token_env: get("token_env")
+            token_env: item
+                .token_env
                 .ok_or_else(|| anyhow!("Plex fleet service missing token_env"))?,
             name,
-            relay_only,
+            relay_only: item
+                .relay_only
+                .ok_or_else(|| anyhow!("Plex fleet service missing relay_only boolean"))?,
             access_token: String::new(),
         });
     }

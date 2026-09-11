@@ -121,6 +121,125 @@ fn public_and_secret_outputs_are_separate_and_secret_is_owner_only() {
 }
 
 #[test]
+fn toml_public_output_loads_through_runtime_fleet_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.toml");
+    let secret = temp.path().join("plex.env");
+    let report = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_library".into(),
+            client_identifier: "stable-server-id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_LIBRARY_TOKEN".into(),
+            relay_only: false,
+            access_token: "discovery-secret".into(),
+        }],
+        drift: Vec::new(),
+    };
+    write_discovery_outputs(&fleet, &secret, &report)
+        .expect("discovery writes its exact TOML public output");
+    fs::write(
+        temp.path().join(".env"),
+        "YARR_PLEX_LIBRARY_TOKEN=discovery-secret\n",
+    )
+    .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_HOME", temp.path());
+    env.set("HOME", temp.path());
+    env.set("YARR_FLEET_FILE", &fleet);
+    env.remove("YARR_SERVICES");
+    env.remove("YARR_PLEX_LIBRARY_TOKEN");
+
+    let loaded = Config::load().expect("exact discovery TOML must load");
+
+    assert!(
+        fs::read_to_string(&fleet)
+            .unwrap()
+            .starts_with("[[services]]")
+    );
+    assert_eq!(loaded.yarr.services.len(), 1);
+    assert_eq!(loaded.yarr.services[0].name, "plex_library");
+    assert_eq!(loaded.yarr.services[0].kind, crate::ServiceKind::Plex);
+    assert_eq!(
+        loaded.yarr.services[0].token.as_deref(),
+        Some("discovery-secret")
+    );
+}
+
+#[test]
+fn existing_toml_fleet_ignores_non_plex_services_for_drift_detection() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.toml");
+    fs::write(
+        &fleet,
+        "[[services]]\nname = \"library\"\nkind = \"sonarr\"\nbase_url = \"https://sonarr.invalid\"\n\n[[services]]\nname = \"plex_library\"\nkind = \"plex\"\nclient_identifier = \"stable-server-id\"\nbase_url = \"https://server.invalid\"\ntoken_env = \"YARR_PLEX_LIBRARY_TOKEN\"\nrelay_only = false\n",
+    )
+    .unwrap();
+
+    let reloaded = read_existing_report(&fleet)
+        .expect("non-Plex fleet services must not affect discovery drift reads");
+
+    assert_eq!(reloaded.resources.len(), 1);
+    assert_eq!(reloaded.resources[0].name, "plex_library");
+}
+
+#[test]
+fn toml_public_output_round_trips_for_drift_detection() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.toml");
+    let secret = temp.path().join("plex.env");
+    let report = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_library".into(),
+            client_identifier: "stable-server-id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_LIBRARY_TOKEN".into(),
+            relay_only: true,
+            access_token: "discovery-secret".into(),
+        }],
+        drift: Vec::new(),
+    };
+    write_discovery_outputs(&fleet, &secret, &report).unwrap();
+
+    let reloaded = read_existing_report(&fleet)
+        .expect("discovery must read its exact TOML output for later --diff runs");
+
+    assert_eq!(reloaded.resources.len(), 1);
+    assert_eq!(reloaded.resources[0].client_identifier, "stable-server-id");
+    assert!(reloaded.resources[0].relay_only);
+}
+
+#[test]
+fn unsupported_fleet_extensions_fail_before_either_output_is_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_library".into(),
+            client_identifier: "stable-server-id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_LIBRARY_TOKEN".into(),
+            relay_only: false,
+            access_token: "discovery-secret".into(),
+        }],
+        drift: Vec::new(),
+    };
+
+    for fleet_name in ["fleet.txt", "fleet"] {
+        let fleet = temp.path().join(fleet_name);
+        let secret = temp.path().join(format!("{fleet_name}.env"));
+        fs::write(&fleet, "sentinel-public").unwrap();
+        fs::write(&secret, "sentinel-secret").unwrap();
+
+        let error = write_discovery_outputs(&fleet, &secret, &report)
+            .expect_err("unsupported fleet extension must be rejected");
+
+        assert!(error.to_string().contains(".yaml, .yml, or .toml"));
+        assert_eq!(fs::read_to_string(&fleet).unwrap(), "sentinel-public");
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "sentinel-secret");
+    }
+}
+
+#[test]
 fn secret_output_ignores_precreated_predictable_temp_symlink() {
     let temp = tempfile::tempdir().unwrap();
     let fleet = temp.path().join("fleet.yaml");
