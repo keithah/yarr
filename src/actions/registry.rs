@@ -409,7 +409,7 @@ pub(crate) fn install_test_curated_command(
         TEST_CURATED_COMMAND_INSTALLATION.get_or_init(|| std::sync::Mutex::new(()));
     let installation_guard = installation_lock
         .lock()
-        .expect("test curated command installation lock poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let slot = TEST_CURATED_COMMAND.get_or_init(|| std::sync::Mutex::new(None));
     let mut slot = slot.lock().expect("test curated command lock poisoned");
     assert!(

@@ -65,3 +65,38 @@ Modified only the curated-command metadata/dispatch boundary, MCP Code Mode auth
 ### Scope
 
 Only `src/actions/registry.rs`, `src/actions/registry_tests.rs`, and this report changed for the follow-up. Production `LocalEffect` behavior is unchanged; no serialized-test workaround, network, credentials, push, or PR actions were used.
+
+## Follow-up re-review repair — test-registration resilience and contention proof
+
+### Findings repaired
+
+1. A test panic while `TestCuratedCommandRegistration` held its installation mutex poisoned that mutex. Later installers called `expect(...)`, turning one intentionally caught test panic into cascading registration failures.
+2. The parallel-installer regression tested a timeout without proving that its second thread had reached `install_test_curated_command`, so a delayed thread could make the test pass without exercising contention.
+
+### Implementation
+
+- Recovered only the test-only installation mutex with `PoisonError::into_inner()`. The slot mutex and its cleanup assertions still fail normally, preserving cleanup-failure visibility.
+- Added a panic-recovery regression: it registers a descriptor, deliberately panics, catches that panic, then installs another descriptor and verifies both presence while registered and absence after drop.
+- Added a `second_started` signal immediately before the second thread invokes `install_test_curated_command`; the test waits for that signal before its bounded completion timeout.
+
+### Strict TDD evidence
+
+1. **Panic recovery RED:** the new focused regression failed at `src/actions/registry.rs:412` with `test curated command installation lock poisoned: PoisonError { .. }` after its intentionally caught panic.
+2. **Panic recovery GREEN:** changed only the installation-lock acquisition to `unwrap_or_else(std::sync::PoisonError::into_inner)`. The focused regression passed, including slot cleanup assertions.
+3. **Contention-proof RED:** after adding the second-start barrier, temporarily released the registration lifetime guard to recreate the prior overlap bug. The focused test failed after the signal with `only one test curated command may be installed`; the existing slot-cleanup poison error also remained visible.
+4. **Contention-proof GREEN:** restored the lifetime guard. The focused serialization test passed with the signal-before-timeout ordering.
+
+### Verification
+
+- Focused tests:
+  - `cargo test --lib actions::registry::tests::test_curated_registration_recovers_after_registered_test_panics -- --exact --nocapture` — passed.
+  - `cargo test --lib actions::registry::tests::test_curated_registration_serializes_parallel_installers -- --exact --nocapture` — passed.
+- `rustfmt --edition 2024 src/actions/registry.rs src/actions/registry_tests.rs` — passed. (`cargo fmt` remains unavailable on this host because the selected toolchain lacks `cargo-fmt`.)
+- `cargo test --lib` under default parallel configuration — 612 passed, 0 failed.
+- `cargo check` — passed.
+- `cargo clippy --all-targets -- -D warnings` — passed.
+- `git diff --check` — passed.
+
+### Scope
+
+Only `src/actions/registry.rs`, `src/actions/registry_tests.rs`, and this Task 1 report changed. No network, live credentials, push, or PR actions were used.

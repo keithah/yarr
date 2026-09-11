@@ -63,6 +63,44 @@ fn local_file_effect_requires_write_scope_and_mutation_metadata() {
 }
 
 #[test]
+fn test_curated_registration_recovers_after_registered_test_panics() {
+    fn noop<'a>(
+        _service: &'a crate::app::YarrService,
+        _args: &'a serde_json::Value,
+    ) -> CommandFuture<'a> {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+
+    fn test_command(name: &'static str) -> CommandDescriptor {
+        CommandDescriptor {
+            name,
+            capability: Capability::ArrManager,
+            description: "test-only descriptor",
+            required_scope: READ_SCOPE,
+            required_params: &[],
+            optional_params: &[],
+            destructive: false,
+            mutates: false,
+            local_effect: LocalEffect::None,
+            typed_params: &[],
+            handler: noop,
+        }
+    }
+
+    let panic = std::panic::catch_unwind(|| {
+        let _registration = install_test_curated_command(test_command("panicking_test"));
+        panic!("intentional panic while a test curated command is registered");
+    });
+    assert!(panic.is_err());
+    assert!(curated_command("panicking_test").is_none());
+
+    let registration = install_test_curated_command(test_command("after_panicking_test"));
+    assert!(curated_command("after_panicking_test").is_some());
+    drop(registration);
+    assert!(curated_command("after_panicking_test").is_none());
+}
+
+#[test]
 fn test_curated_registration_serializes_parallel_installers() {
     fn noop<'a>(
         _service: &'a crate::app::YarrService,
@@ -89,6 +127,7 @@ fn test_curated_registration_serializes_parallel_installers() {
 
     let (first_installed_tx, first_installed_rx) = std::sync::mpsc::channel();
     let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+    let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
     let (second_finished_tx, second_finished_rx) = std::sync::mpsc::channel();
 
     std::thread::scope(|scope| {
@@ -101,6 +140,7 @@ fn test_curated_registration_serializes_parallel_installers() {
 
         first_installed_rx.recv().unwrap();
         let second = scope.spawn(move || {
+            second_started_tx.send(()).unwrap();
             let result = std::panic::catch_unwind(|| {
                 drop(install_test_curated_command(test_command(
                     "second_parallel_test",
@@ -109,6 +149,7 @@ fn test_curated_registration_serializes_parallel_installers() {
             second_finished_tx.send(result.is_ok()).unwrap();
         });
 
+        second_started_rx.recv().unwrap();
         let second_waited_for_first_drop = second_finished_rx
             .recv_timeout(std::time::Duration::from_millis(100))
             .is_err();
