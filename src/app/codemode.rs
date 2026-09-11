@@ -431,6 +431,7 @@ impl YarrService {
                         in_snippet,
                         std::sync::Arc::clone(&guard),
                         &mut targets,
+                        request.deadline.instant.into_std(),
                     ),
                 ),
             )
@@ -451,6 +452,7 @@ impl YarrService {
         in_snippet: bool,
         guard: std::sync::Arc<dyn CodeModeCallGuard>,
         targets: &mut std::collections::BTreeSet<String>,
+        deadline: std::time::Instant,
     ) -> Result<String, String> {
         if id == "codemode" {
             return Err("codemode cannot invoke codemode".to_owned());
@@ -474,8 +476,56 @@ impl YarrService {
             targets.insert(target);
             return Ok("null".to_owned());
         }
+        if let YarrAction::SnippetRun { name, input } = &action {
+            let source = self
+                .snippet_source_for_preflight(name)
+                .map_err(|error| error.to_string())?;
+            let input_json = serde_json::to_string(input)
+                .map_err(|error| format!("snippet input is not serializable as JSON: {error}"))?;
+            // Expand the saved source in its own planning sandbox. This retains
+            // source semantics and data-dependent reads, but never invokes the
+            // snippet runtime (which could perform its effects during planning).
+            targets.extend(
+                Box::pin(self.plan_script_destructive_targets(
+                    &source,
+                    Some(&input_json),
+                    true,
+                    EngineLimits {
+                        memory_bytes: CODEMODE_MEMORY_LIMIT,
+                        stack_bytes: CODEMODE_STACK_LIMIT,
+                        deadline,
+                    },
+                    guard,
+                ))
+                .await?,
+            );
+            return Ok("null".to_owned());
+        }
+        if self.codemode_action_mutates(&action) {
+            // Planning may only use real read results. A non-destructive write is
+            // deliberately opaque here so it can execute once, at runtime, after
+            // the complete destructive target set (if any) is authorized.
+            return Ok("null".to_owned());
+        }
         self.codemode_dispatch(id, params_json, in_snippet, Some(guard))
             .await
+    }
+
+    fn codemode_action_mutates(&self, action: &YarrAction) -> bool {
+        match action {
+            YarrAction::Op { service, op, .. } => self
+                .kind_of(service)
+                .ok()
+                .flatten()
+                .and_then(|kind| crate::openapi::safety::operation_safety(kind, op))
+                .map(|safety| safety.mutates)
+                // An unclassified generated operation must never become a planning read.
+                .unwrap_or(true),
+            YarrAction::Curated { name, .. } => {
+                crate::actions::curated_command(name).is_some_and(|command| command.mutates)
+            }
+            _ => crate::actions::action_spec(action.name()).is_some_and(|spec| spec.mutates),
+        }
     }
 }
 

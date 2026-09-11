@@ -152,3 +152,38 @@ is recorded/authorized, and the second GET plus DELETE is actual execution. The
 single-worker regression proves an infinite-loop planning run yields Tokio while
 QuickJS runs on `spawn_blocking`; the run itself still terminates at the absolute
 deadline. The full library suite reported 627 passing tests.
+
+## Follow-up repair: read-only planning boundary and saved-source expansion
+
+Planning is now a strict read-only evaluator. It parses every emitted action through
+`YarrAction`; generic and curated metadata plus generated OpenAPI safety determine
+whether the action mutates. Any mutation returns a deterministic `null` placeholder
+and does not reach the dispatcher or transport. Unknown generated operations fail
+closed as mutations. Saved `codemode.run(...)` calls load and plan their source with
+the same deadline, input binding, and one-level nesting bound; they do not run the
+snippet runtime during outer planning. The expanded targets are included in the outer
+single authorization before runtime begins.
+
+### RED evidence
+
+```sh
+cargo test app::codemode::tests::guarded_planning_never_dispatches_a_generic_non_destructive_mutation --lib -- --nocapture
+# exit 101: observed ["POST", "POST"] instead of one runtime POST
+cargo test app::codemode::tests::guarded_parent_snippet_planning_expands_destructive_source_without_dispatching_it --lib -- --nocapture
+# exit 101 before saved-source expansion: outer and nested preflights authorized separately
+```
+
+### GREEN evidence
+
+```sh
+cargo fmt
+cargo test app::codemode --lib
+cargo test mcp::tools --lib
+cargo clippy --all-targets -- -D warnings
+```
+
+All commands exited `0` on 2026-09-11. The new controlled-HTTP regression observes
+exactly one `POST` for a guarded generic non-destructive mutation: zero during
+planning and one at runtime. The saved-snippet regression observes exactly one
+`DELETE`, while retaining the existing `GET, GET, DELETE` data-dependent path and
+single-worker `spawn_blocking` admission regression.

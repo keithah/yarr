@@ -419,6 +419,108 @@ async fn guarded_codemode_plans_data_dependent_delete_after_real_read() {
     );
 }
 
+#[tokio::test]
+async fn guarded_planning_never_dispatches_a_generic_non_destructive_mutation() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&requests);
+    let app = axum::Router::new().fallback(axum::routing::any(
+        move |request: axum::extract::Request| {
+            let observed = std::sync::Arc::clone(&observed);
+            async move {
+                observed.lock().unwrap().push(request.method().to_string());
+                axum::Json(serde_json::json!({ "ok": true }))
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = crate::config::YarrConfig {
+        services: vec![crate::config::ServiceConfig {
+            name: "sonarr".to_owned(),
+            kind: crate::config::ServiceKind::Sonarr,
+            base_url: format!("http://{address}").parse().unwrap(),
+            api_key: Some("test".to_owned()),
+            ..Default::default()
+        }],
+    };
+    let service =
+        crate::app::YarrService::new(crate::yarr::YarrClient::new(&config).unwrap(), config);
+
+    service
+        .codemode_with_guard(
+            r#"async () => api.sonarr.post("/api/v3/command", { name: "RefreshSeries" })"#,
+            std::sync::Arc::new(PreflightRecordingGuard {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        vec!["POST"],
+        "the planning sandbox must not send a non-destructive mutation"
+    );
+}
+
+#[tokio::test]
+async fn guarded_parent_snippet_planning_expands_destructive_source_without_dispatching_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&requests);
+    let app = axum::Router::new().fallback(axum::routing::any(
+        move |request: axum::extract::Request| {
+            let observed = std::sync::Arc::clone(&observed);
+            async move {
+                observed.lock().unwrap().push(request.method().to_string());
+                axum::Json(serde_json::json!({ "ok": true }))
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = crate::config::YarrConfig {
+        services: vec![crate::config::ServiceConfig {
+            name: "sonarr".to_owned(),
+            kind: crate::config::ServiceKind::Sonarr,
+            base_url: format!("http://{address}").parse().unwrap(),
+            api_key: Some("test".to_owned()),
+            ..Default::default()
+        }],
+    };
+    let service =
+        crate::app::YarrService::new(crate::yarr::YarrClient::new(&config).unwrap(), config)
+            .with_data_dir(tmp.path().to_path_buf());
+    service
+        .snippet_save(
+            "delete-series",
+            r#"async () => api.sonarr.delete("/api/v3/series/1")"#,
+            None,
+        )
+        .await
+        .unwrap();
+    let planned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    service
+        .codemode_with_guard(
+            r#"async () => codemode.run("delete-series", {})"#,
+            std::sync::Arc::new(DataDependentPlanningGuard {
+                planned: std::sync::Arc::clone(&planned),
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*planned.lock().unwrap(), vec!["sonarr"]);
+    assert_eq!(
+        *requests.lock().unwrap(),
+        vec!["DELETE"],
+        "outer planning must expand saved source without executing it"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn guarded_planning_does_not_block_the_tokio_worker() {
     let service = loopback_state().service.with_codemode_limits(
