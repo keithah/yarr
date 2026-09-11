@@ -244,16 +244,32 @@ impl Config {
 
         let fleet_file = env_value("YARR_FLEET_FILE").filter(|path| !path.is_empty());
         if let Some(path) = fleet_file {
-            let file_services = load_fleet_file(std::path::Path::new(&path))?;
+            let mut file_services = load_fleet_file(std::path::Path::new(&path))?;
+            let mut env_config = YarrConfig::default();
+            load_services_from_env(&mut env_config)?;
+
+            // Preserve the TOML/fleet collision contract even when an environment
+            // service would replace either entry later.
+            merge_toml_and_fleet_services(config.yarr.services.clone(), file_services.clone())?;
+
+            // Fleet credentials are references, while TOML and environment
+            // credentials are literal values. Resolve only surviving fleet entries
+            // after applying environment precedence, so an authoritative
+            // environment service cannot require an unused fleet reference.
+            let environment_names = env_config
+                .services
+                .iter()
+                .map(|service| service.name.to_ascii_lowercase())
+                .collect::<std::collections::BTreeSet<_>>();
+            file_services
+                .retain(|service| !environment_names.contains(&service.name.to_ascii_lowercase()));
+            resolve_fleet_credentials(&mut file_services)?;
+
             let toml_and_fleet = merge_toml_and_fleet_services(
                 std::mem::take(&mut config.yarr.services),
                 file_services,
             )?;
-            let mut env_config = YarrConfig::default();
-            load_services_from_env(&mut env_config)?;
-            let mut services = merge_service_sources(toml_and_fleet, env_config.services)?;
-            resolve_fleet_credentials(&mut services)?;
-            config.yarr.services = services;
+            config.yarr.services = merge_service_sources(toml_and_fleet, env_config.services)?;
         } else {
             load_services_from_env(&mut config.yarr)?;
         }

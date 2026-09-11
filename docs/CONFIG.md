@@ -98,7 +98,9 @@ source case-insensitively; other entries remain in the union. Duplicate names,
 normalized Code Mode namespace collisions (such as `home-media` and
 `home_media`), and reserved globals such as `api` fail startup regardless of
 whether they came from TOML, the fleet file, or the environment. Keep URLs and
-reference names public; put credential values only in the environment overlay.
+reference names public; put fleet credential values only in the environment overlay.
+Literal credential fields in `config.toml` remain literal and are never treated as
+fleet reference names, even when `YARR_FLEET_FILE` is enabled.
 
 ## Auth Policy
 

@@ -200,6 +200,33 @@ fn config_load_preserves_toml_services_and_gives_environment_precedence_over_fle
 }
 
 #[test]
+fn config_load_preserves_literal_toml_credentials_when_fleet_is_enabled() {
+    let config = write_fixture(
+        "toml",
+        "[[yarr.services]]\nname = \"toml-only\"\nkind = \"sonarr\"\nbase_url = \"https://toml.example.invalid\"\napi_key = \"toml-literal-key\"\n",
+    );
+    let fleet = write_fixture(
+        "yaml",
+        "services:\n  - name: fleet-only\n    kind: radarr\n    base_url: https://fleet.example.invalid\n",
+    );
+    let mut env = crate::testing::TestEnv::new();
+    env.set("YARR_CONFIG", config.path());
+    env.set("YARR_FLEET_FILE", fleet.path());
+    env.remove("YARR_SERVICES");
+    env.remove("toml-literal-key");
+
+    let loaded = Config::load().expect("literal TOML credentials remain usable with fleet enabled");
+
+    let toml_service = loaded
+        .yarr
+        .services
+        .iter()
+        .find(|service| service.name == "toml-only")
+        .expect("TOML service is retained");
+    assert_eq!(toml_service.api_key.as_deref(), Some("toml-literal-key"));
+}
+
+#[test]
 fn config_load_rejects_toml_and_fleet_name_collision() {
     let config = write_fixture(
         "toml",
@@ -219,6 +246,33 @@ fn config_load_rejects_toml_and_fleet_name_collision() {
     assert!(error.to_string().contains("config.toml"));
     assert!(error.to_string().contains("fleet file"));
     assert!(error.to_string().contains("library"));
+}
+
+#[test]
+fn config_loads_fleet_credential_from_dotenv_overlay() {
+    let fixture = write_fixture(
+        "yaml",
+        "services:\n  - name: library\n    kind: sonarr\n    base_url: https://public.example.invalid\n    api_key_env: YARR_LIBRARY_API_KEY\n",
+    );
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".env"),
+        "YARR_LIBRARY_API_KEY=from-overlay\n",
+    )
+    .unwrap();
+    let mut env = crate::testing::TestEnv::new();
+    env.set("YARR_HOME", home.path());
+    env.set("HOME", home.path());
+    env.set("YARR_FLEET_FILE", fixture.path());
+    env.remove("YARR_SERVICES");
+    env.remove("YARR_LIBRARY_API_KEY");
+
+    let loaded = Config::load().expect("fleet reference resolves from the installed overlay");
+
+    assert_eq!(
+        loaded.yarr.services[0].api_key.as_deref(),
+        Some("from-overlay")
+    );
 }
 
 #[test]
