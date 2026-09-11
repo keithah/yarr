@@ -361,6 +361,45 @@ fn body_preview_redacts_quoted_plaintext_values_through_escaped_quote_parity() {
 }
 
 #[test]
+fn body_preview_redacts_single_quoted_plaintext_values_through_escaped_quote_parity() {
+    const COLON_SECRET: &str = "SQ_COLON";
+    const EQUALS_SECRET: &str = "SQ_EQUALS";
+    const WHITESPACE_SECRET: &str = "SQ_SPACE";
+    const ESCAPED_QUOTE_SECRET: &str = "SQ_ESCAPED";
+    const EVEN_BACKSLASH_SECRET: &str = "SQ_EVEN";
+    let preview = body_preview(&format!(
+        r#"Plex failure: accessToken: '{COLON_SECRET}'; auth-token = '{EQUALS_SECRET}'; token '{WHITESPACE_SECRET}'; access_token: 'prefix\'{ESCAPED_QUOTE_SECRET}'; authToken = '{EVEN_BACKSLASH_SECRET}\\'; status=500"#
+    ));
+
+    for secret in [
+        COLON_SECRET,
+        EQUALS_SECRET,
+        WHITESPACE_SECRET,
+        ESCAPED_QUOTE_SECRET,
+        EVEN_BACKSLASH_SECRET,
+    ] {
+        assert!(
+            !preview.contains(secret),
+            "single-quoted plaintext credential leaked"
+        );
+    }
+    assert_eq!(preview.matches("[redacted]").count(), 5);
+    assert!(preview.contains("status=500"));
+}
+
+#[test]
+fn body_preview_redacts_unclosed_single_quoted_plaintext_value_to_preview_end() {
+    const UNCLOSED_SECRET: &str = "UNIT_SINGLE_QUOTED_UNCLOSED_SECRET";
+    let preview = body_preview(&format!("Plex failure: auth-token = '{UNCLOSED_SECRET}"));
+
+    assert!(
+        !preview.contains(UNCLOSED_SECRET),
+        "unclosed single-quoted plaintext credential leaked"
+    );
+    assert_eq!(preview, "Plex failure: [redacted]");
+}
+
+#[test]
 fn body_preview_redacts_truncated_quoted_plaintext_value() {
     const TRUNCATED_QUOTED_SECRET: &str = "UNIT_TRUNCATED_QUOTED_PLAINTEXT_SECRET";
     let preview = body_preview(&format!(

@@ -340,7 +340,8 @@ fn redact_json_value_secrets(value: &mut Value) {
 }
 
 /// Redact `key=value`, `key: value`, and `key value` credentials, including
-/// quoted plaintext values. A quoted value ends at the first unescaped quote;
+/// single- and double-quoted plaintext values. A quoted value ends at the first
+/// unescaped matching quote;
 /// an unclosed quote is redacted through the bounded preview's end.
 ///
 /// A credential alias must begin at a text-token boundary, so a word such as
@@ -380,8 +381,8 @@ fn redact_plaintext_secrets(preview: &mut String) {
                 from = after_key;
                 continue;
             }
-            let value_end = if bytes[value_start] == b'"' {
-                json_string_end(bytes, value_start)
+            let value_end = if matches!(bytes[value_start], b'\'' | b'"') {
+                quoted_string_end(bytes, value_start)
                     .map(|end| end + 1)
                     .unwrap_or(bytes.len())
             } else {
@@ -399,6 +400,23 @@ fn redact_plaintext_secrets(preview: &mut String) {
             from = key_at + "[redacted]".len();
         }
     }
+}
+
+/// Returns the byte offset of a single- or double-quoted plaintext value's closing
+/// delimiter. Delimiters preceded by an odd-length backslash run are escaped.
+fn quoted_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = bytes[start];
+    let mut i = start + 1;
+    let mut backslash_run = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => backslash_run += 1,
+            byte if byte == quote && backslash_run % 2 == 0 => return Some(i),
+            _ => backslash_run = 0,
+        }
+        i += 1;
+    }
+    None
 }
 
 fn is_plaintext_key_boundary(preview: &str, key_at: usize) -> bool {
