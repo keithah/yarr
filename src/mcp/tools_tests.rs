@@ -75,6 +75,22 @@ async fn service_tool_injects_service_argument() {
 }
 
 #[tokio::test]
+async fn fleet_readonly_rejects_generated_post_before_transport() {
+    let mut state = loopback_state();
+    state.config.fleet_readonly = true;
+
+    let error = super::execute_tool_without_peer_for_test(
+        &state,
+        "sonarr",
+        json!({ "action": "op", "op": "post_command", "args": { "body": {} } }),
+    )
+    .await
+    .expect_err("fleet readonly must reject a generated mutation before transport");
+
+    assert!(error.to_string().contains("YARR_FLEET_READONLY"));
+}
+
+#[tokio::test]
 async fn read_authorized_codemode_cannot_invoke_local_file_writer() {
     let _command = install_test_curated_command(CommandDescriptor {
         name: "test_local_file_writer",

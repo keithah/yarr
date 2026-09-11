@@ -132,6 +132,7 @@ impl CodeModeCallGuard for McpCodeModeGuard {
             if let Some(auth) = self.auth.as_ref() {
                 authorize_codemode_action_scopes(&auth.scopes, action)?;
             }
+            reject_fleet_readonly_mutation(&self.state, action)?;
 
             let (destructive, service_name) = destructive_inner_call(&self.state, action);
             if !destructive {
@@ -143,7 +144,11 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                     action.name()
                 ));
             }
-            if super::elicit::gate_destructive(&self.peer, action.name(), service_name).await
+            let targets = super::rmcp_server::destructive_targets(
+                &[service_name.to_owned()],
+                self.state.config.destructive_fanout_max,
+            )?;
+            if super::elicit::gate_destructive(&self.peer, action.name(), &targets).await
                 == super::elicit::DeleteGate::Declined
             {
                 return Err(format!(
@@ -195,7 +200,38 @@ async fn dispatch_service_tool(
     // shared service-layer dispatch. No special cases or business logic here.
     let args = inject_service(args, service);
     let action = YarrAction::from_mcp_args(&args)?;
+    reject_fleet_readonly_mutation(state, &action).map_err(anyhow::Error::msg)?;
     execute_service_action(&state.service, &action).await
+}
+
+/// Fleet read-only policy is enforced on every MCP mutation before shared action
+/// dispatch can create an upstream request. Generated operations consult their
+/// authoritative safety classification so generated GETs remain available.
+fn reject_fleet_readonly_mutation(state: &AppState, action: &YarrAction) -> Result<(), String> {
+    if !state.config.fleet_readonly || !action_mutates(state, action) {
+        return Ok(());
+    }
+    Err(format!(
+        "YARR_FLEET_READONLY rejects mutating action `{}`; nothing changed",
+        action.name()
+    ))
+}
+
+fn action_mutates(state: &AppState, action: &YarrAction) -> bool {
+    match action {
+        YarrAction::Op { service, op, .. } => state
+            .service
+            .kind_of(service)
+            .ok()
+            .flatten()
+            .and_then(|kind| crate::openapi::safety::operation_safety(kind, op))
+            .map(|safety| safety.mutates)
+            .unwrap_or(true),
+        YarrAction::Curated { name, .. } => {
+            crate::actions::curated_command(name).is_some_and(|command| command.mutates)
+        }
+        _ => crate::actions::action_spec(action.name()).is_some_and(|spec| spec.mutates),
+    }
 }
 
 fn inject_service(args: Value, service: &str) -> Value {

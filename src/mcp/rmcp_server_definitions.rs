@@ -98,6 +98,25 @@ pub(super) fn is_destructive_op_call(state: &AppState, tool_name: &str, argument
         .is_some_and(|safety| safety.elicitation_required)
 }
 
+/// Canonicalize a destructive target set before it can reach elicitation or
+/// dispatch. Fleet callers pass their complete selection here; today's direct
+/// tools naturally produce a one-service set.
+pub(crate) fn destructive_targets(
+    services: &[String],
+    fanout_max: usize,
+) -> Result<Vec<String>, String> {
+    let mut targets = services.to_vec();
+    targets.sort();
+    targets.dedup();
+    if targets.len() > fanout_max {
+        return Err(format!(
+            "destructive action targets {} services but the maximum is {fanout_max}",
+            targets.len()
+        ));
+    }
+    Ok(targets)
+}
+
 /// Result returned when a destructive action is declined at the elicitation
 /// prompt: a structured success payload (nothing was changed), not an error.
 pub(super) fn declined_result(action: &str) -> Result<CallToolResult, ErrorData> {

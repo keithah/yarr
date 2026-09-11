@@ -1,4 +1,5 @@
 use super::*;
+use crate::mcp::rmcp_server::destructive_targets;
 #[test]
 fn read_scope_satisfies_read_requirement() {
     assert!(scope_satisfied(&scopes(&[READ_SCOPE]), READ_SCOPE));
@@ -208,4 +209,20 @@ fn destructive_op_call_ignores_unknown_service_or_op() {
         &json!({ "op": "no_such_op" })
     ));
     assert!(!is_destructive_op_call(&state, "sonarr", &json!({})));
+}
+
+#[test]
+fn destructive_target_validation_sorts_deduplicates_and_caps_fanout() {
+    assert_eq!(
+        destructive_targets(&["radarr".into(), "sonarr".into(), "radarr".into()], 3)
+            .expect("three distinct or fewer targets are allowed"),
+        vec!["radarr", "sonarr"]
+    );
+
+    let error = destructive_targets(
+        &["one".into(), "two".into(), "three".into(), "four".into()],
+        3,
+    )
+    .expect_err("four destructive targets must be rejected before elicitation");
+    assert!(error.contains("maximum is 3"));
 }
