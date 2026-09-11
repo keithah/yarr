@@ -1,6 +1,65 @@
-use super::{FleetInvocation, FleetSelector};
+use super::{FleetInvocation, FleetSelector, parse_private_invocation};
 use crate::{ServiceConfig, ServiceKind, YarrClient, YarrConfig, YarrService};
 use serde_json::{Map, Value, json};
+
+#[test]
+fn private_fleet_invocation_rejects_unknown_outer_field() {
+    let error = parse_private_invocation(
+        r#"{"selector":{"type":"of","name":"instance-01"},"action":"service_status","unexpected":true}"#,
+    )
+    .expect_err("unknown outer fields must be rejected");
+
+    assert_eq!(error, "fleet params contains unknown field `unexpected`");
+}
+
+#[test]
+fn private_fleet_invocation_rejects_unknown_all_selector_field() {
+    let error = parse_private_invocation(
+        r#"{"selector":{"type":"all","kind":"sonarr","unexpected":true},"action":"service_status"}"#,
+    )
+    .expect_err("unknown all-selector fields must be rejected");
+
+    assert_eq!(
+        error,
+        "fleet.all selector contains unknown field `unexpected`"
+    );
+}
+
+#[test]
+fn private_fleet_invocation_rejects_unknown_of_selector_field() {
+    let error = parse_private_invocation(
+        r#"{"selector":{"type":"of","name":"instance-01","unexpected":true},"action":"service_status"}"#,
+    )
+    .expect_err("unknown of-selector fields must be rejected");
+
+    assert_eq!(
+        error,
+        "fleet.of selector contains unknown field `unexpected`"
+    );
+}
+
+#[test]
+fn private_fleet_invocation_accepts_existing_valid_forms() {
+    let of = parse_private_invocation(
+        r#"{"selector":{"type":"of","name":"instance-01"},"action":"service_status","params":{"verbose":true}}"#,
+    )
+    .expect("valid of selector must parse");
+    assert_eq!(
+        of.selector,
+        FleetSelector::Of {
+            name: "instance-01".into()
+        }
+    );
+    assert_eq!(of.action, "service_status");
+    assert_eq!(of.params.get("verbose"), Some(&Value::Bool(true)));
+
+    let all = parse_private_invocation(
+        r#"{"selector":{"type":"all","kind":null},"action":"service_status"}"#,
+    )
+    .expect("valid all selector must parse");
+    assert_eq!(all.selector, FleetSelector::All { kind: None });
+    assert!(all.params.is_empty());
+}
 
 fn service() -> YarrService {
     let services = (0..20)

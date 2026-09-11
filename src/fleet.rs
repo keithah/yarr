@@ -69,12 +69,27 @@ impl PlannedFleetLeaf {
     }
 }
 
+fn reject_unknown_fields(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(format!("{context} contains unknown field `{field}`"));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_private_invocation(params_json: &str) -> Result<FleetInvocation, String> {
     let params: Value = serde_json::from_str(params_json)
         .map_err(|error| format!("invalid fleet params: {error}"))?;
     let object = params
         .as_object()
         .ok_or_else(|| "fleet params must be a JSON object".to_owned())?;
+    reject_unknown_fields(object, &["selector", "action", "params"], "fleet params")?;
     let action = object
         .get("action")
         .and_then(Value::as_str)
@@ -94,23 +109,29 @@ pub(crate) fn parse_private_invocation(params_json: &str) -> Result<FleetInvocat
         .and_then(Value::as_object)
         .ok_or_else(|| "fleet selector must be an object".to_owned())?;
     let selector = match selector.get("type").and_then(Value::as_str) {
-        Some("of") => FleetSelector::Of {
-            name: selector
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| "fleet.of requires a name".to_owned())?
-                .to_owned(),
-        },
-        Some("all") => FleetSelector::All {
-            kind: match selector.get("kind") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(kind)) => {
-                    Some(ServiceKind::from_str(kind).map_err(|error| error.to_string())?)
-                }
-                Some(_) => return Err("fleet.all kind must be a string or null".to_owned()),
-            },
-        },
+        Some("of") => {
+            reject_unknown_fields(selector, &["type", "name"], "fleet.of selector")?;
+            FleetSelector::Of {
+                name: selector
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| "fleet.of requires a name".to_owned())?
+                    .to_owned(),
+            }
+        }
+        Some("all") => {
+            reject_unknown_fields(selector, &["type", "kind"], "fleet.all selector")?;
+            FleetSelector::All {
+                kind: match selector.get("kind") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(kind)) => {
+                        Some(ServiceKind::from_str(kind).map_err(|error| error.to_string())?)
+                    }
+                    Some(_) => return Err("fleet.all kind must be a string or null".to_owned()),
+                },
+            }
+        }
         _ => return Err("fleet selector type must be `of` or `all`".to_owned()),
     };
     Ok(FleetInvocation {
