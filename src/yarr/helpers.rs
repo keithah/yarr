@@ -290,23 +290,52 @@ const SECRET_KEYS: &[&str] = &[
     "password",
 ];
 
-/// Redacts three secret shapes (LOW-1): query-string `key=value` pairs,
-/// plaintext `key: value`/`key value` fragments, and JSON-style
-/// `"key":"value"` members, for a fixed set of credential key names
-/// (case-insensitive). The 160-char cap and control-char stripping are applied
-/// first, so redaction operates on the already-truncated preview.
+/// Redacts three secret shapes (LOW-1): valid JSON object members by semantically
+/// decoded key, plus query-string `key=value` pairs, plaintext `key: value`/`key
+/// value` fragments, and JSON-style `"key":"value"` members in malformed or
+/// truncated bodies. The 160-char cap and control-char stripping are applied first,
+/// so redaction operates on the already-truncated preview.
 pub fn body_preview(text: &str) -> String {
     let mut preview: String = text
         .chars()
         .filter(|ch| !ch.is_control() || ch.is_whitespace())
         .take(160)
         .collect();
+
+    if let Ok(mut json) = serde_json::from_str::<Value>(&preview) {
+        redact_json_value_secrets(&mut json);
+        return serde_json::to_string(&json).unwrap_or_else(|_| "[redacted]".into());
+    }
+
     redact_plaintext_secrets(&mut preview);
     redact_json_secrets(&mut preview);
     if preview.trim().is_empty() {
         "<empty body>".into()
     } else {
         preview
+    }
+}
+
+fn redact_json_value_secrets(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                redact_json_value_secrets(item);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if SECRET_KEYS
+                    .iter()
+                    .any(|secret| key.eq_ignore_ascii_case(secret))
+                {
+                    *value = Value::String("[redacted]".into());
+                } else {
+                    redact_json_value_secrets(value);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

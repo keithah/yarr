@@ -189,6 +189,61 @@ fn body_preview_redacts_json_secrets_case_insensitive_and_spaced() {
 }
 
 #[test]
+fn body_preview_redacts_valid_json_newline_separated_access_token() {
+    const NEWLINE_ACCESS_TOKEN: &str = "VALID_JSON_NEWLINE_ACCESS_TOKEN_SECRET";
+    let preview = body_preview(&format!(
+        "{{\"accessToken\"\n:\n\"{NEWLINE_ACCESS_TOKEN}\",\"status\":\"ok\"}}"
+    ));
+
+    assert!(
+        !preview.contains(NEWLINE_ACCESS_TOKEN),
+        "newline-separated JSON credential leaked: {preview}"
+    );
+    assert!(preview.contains("[redacted]"), "got: {preview}");
+    assert!(
+        preview.contains("status"),
+        "lost non-secret field: {preview}"
+    );
+}
+
+#[test]
+fn body_preview_redacts_valid_json_escaped_unicode_access_token_key() {
+    const ESCAPED_KEY_ACCESS_TOKEN: &str = "VALID_JSON_ESCAPED_KEY_ACCESS_TOKEN_SECRET";
+    let preview = body_preview(&format!(
+        r#"{{"access\u0054oken":"{ESCAPED_KEY_ACCESS_TOKEN}","status":"ok"}}"#
+    ));
+
+    assert!(
+        !preview.contains(ESCAPED_KEY_ACCESS_TOKEN),
+        "escaped-key JSON credential leaked: {preview}"
+    );
+    assert!(preview.contains("[redacted]"), "got: {preview}");
+    assert!(
+        preview.contains("status"),
+        "lost non-secret field: {preview}"
+    );
+}
+
+#[test]
+fn body_preview_redacts_nested_valid_json_secret_values_of_any_type() {
+    const NESTED_SECRET: &str = "NESTED_VALID_JSON_ACCESS_TOKEN_SECRET";
+    let preview = body_preview(&format!(
+        r#"{{"password":1234,"items":[{{"accessToken":{{"value":"{NESTED_SECRET}"}},"name":"keep"}}]}}"#
+    ));
+
+    assert!(
+        !preview.contains("1234"),
+        "numeric secret leaked: {preview}"
+    );
+    assert!(
+        !preview.contains(NESTED_SECRET),
+        "nested secret leaked: {preview}"
+    );
+    assert!(preview.contains("keep"), "lost non-secret field: {preview}");
+    assert_eq!(preview.matches("[redacted]").count(), 2, "got: {preview}");
+}
+
+#[test]
 fn body_preview_redacts_json_secrets_through_escaped_quotes() {
     const ESCAPED_QUOTE_SUFFIX: &str = "JSON_ESCAPED_SUFFIX_SECRET";
     let preview = body_preview(&format!(
@@ -198,13 +253,25 @@ fn body_preview_redacts_json_secrets_through_escaped_quotes() {
         !preview.contains(ESCAPED_QUOTE_SUFFIX),
         "escaped-quote suffix leaked: {preview}"
     );
-    assert_eq!(preview, r#"{"accessToken":[redacted]}"#);
+    assert_eq!(preview, r#"{"accessToken":"[redacted]"}"#);
 
     let escaped_backslash = body_preview(r#"{"accessToken":"prefix\\","status":"ok"}"#);
     assert_eq!(
-        escaped_backslash, r#"{"accessToken":[redacted],"status":"ok"}"#,
+        escaped_backslash, r#"{"accessToken":"[redacted]","status":"ok"}"#,
         "an even backslash run must allow the quote to close the JSON string"
     );
+}
+
+#[test]
+fn body_preview_redacts_truncated_json_with_scanner_fallback() {
+    const TRUNCATED_ACCESS_TOKEN: &str = "TRUNCATED_JSON_ACCESS_TOKEN_SECRET";
+    let preview = body_preview(&format!(r#"{{"accessToken":"{TRUNCATED_ACCESS_TOKEN}"#));
+
+    assert!(
+        !preview.contains(TRUNCATED_ACCESS_TOKEN),
+        "truncated JSON credential leaked: {preview}"
+    );
+    assert!(preview.contains("[redacted]"), "got: {preview}");
 }
 
 #[test]
