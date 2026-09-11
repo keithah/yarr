@@ -165,6 +165,63 @@ fn config_loads_fleet_after_overlay_and_replaces_file_with_environment_service()
 }
 
 #[test]
+fn config_load_preserves_toml_services_and_gives_environment_precedence_over_fleet() {
+    let config = write_fixture(
+        "toml",
+        "[[yarr.services]]\nname = \"toml-only\"\nkind = \"sonarr\"\nbase_url = \"https://toml.example.invalid\"\n",
+    );
+    let fleet = write_fixture(
+        "yaml",
+        "services:\n  - name: Library\n    kind: radarr\n    base_url: https://fleet.example.invalid\n  - name: fleet-only\n    kind: sonarr\n    base_url: https://fleet.example.invalid\n",
+    );
+    let mut env = crate::testing::TestEnv::new();
+    env.set("YARR_CONFIG", config.path());
+    env.set("YARR_FLEET_FILE", fleet.path());
+    env.set("YARR_SERVICES", "library");
+    env.set("YARR_LIBRARY_KIND", "sonarr");
+    env.set("YARR_LIBRARY_URL", "https://env.example.invalid");
+
+    let loaded = Config::load().expect("TOML, fleet, and environment services load");
+
+    assert_eq!(
+        loaded
+            .yarr
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        ["fleet-only", "library", "toml-only"]
+    );
+    assert_eq!(loaded.yarr.services[1].kind, ServiceKind::Sonarr);
+    assert_eq!(
+        loaded.yarr.services[1].base_url,
+        "https://env.example.invalid"
+    );
+}
+
+#[test]
+fn config_load_rejects_toml_and_fleet_name_collision() {
+    let config = write_fixture(
+        "toml",
+        "[[yarr.services]]\nname = \"library\"\nkind = \"sonarr\"\nbase_url = \"https://toml.example.invalid\"\n",
+    );
+    let fleet = write_fixture(
+        "yaml",
+        "services:\n  - name: Library\n    kind: radarr\n    base_url: https://fleet.example.invalid\n",
+    );
+    let mut env = crate::testing::TestEnv::new();
+    env.set("YARR_CONFIG", config.path());
+    env.set("YARR_FLEET_FILE", fleet.path());
+    env.remove("YARR_SERVICES");
+
+    let error = Config::load().expect_err("TOML/fleet collision must be actionable");
+
+    assert!(error.to_string().contains("config.toml"));
+    assert!(error.to_string().contains("fleet file"));
+    assert!(error.to_string().contains("library"));
+}
+
+#[test]
 fn config_rejects_unresolved_credential_reference_from_installed_overlay() {
     let fixture = write_fixture(
         "yaml",

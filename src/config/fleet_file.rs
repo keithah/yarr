@@ -76,6 +76,35 @@ pub fn load_fleet_file(path: &Path) -> anyhow::Result<Vec<ServiceConfig>> {
     Ok(services)
 }
 
+/// Combine services declared by `config.toml` and a fleet file. Those sources
+/// both express durable configuration, so same-name entries are rejected rather
+/// than silently selecting one. `YARR_SERVICES` is applied afterwards and remains
+/// authoritative through [`merge_service_sources`].
+pub(super) fn merge_toml_and_fleet_services(
+    toml: Vec<ServiceConfig>,
+    file: Vec<ServiceConfig>,
+) -> anyhow::Result<Vec<ServiceConfig>> {
+    validate_source("config.toml", &toml)?;
+    validate_source("fleet file", &file)?;
+
+    let mut merged = BTreeMap::new();
+    for service in toml {
+        merged.insert(service.name.to_ascii_lowercase(), service);
+    }
+    for service in file {
+        let key = service.name.to_ascii_lowercase();
+        if let Some(existing) = merged.get(&key) {
+            anyhow::bail!(
+                "config.toml service {:?} conflicts with fleet file service {:?} (case-insensitive); rename one source or remove the duplicate",
+                existing.name,
+                service.name,
+            );
+        }
+        merged.insert(key, service);
+    }
+    Ok(merged.into_values().collect())
+}
+
 /// Merge public fleet-file services with environment services. Environment entries
 /// replace case-insensitive name matches; all other entries form a deterministic
 /// name-sorted union.
@@ -94,7 +123,10 @@ pub fn merge_service_sources(
         merged.insert(service.name.to_ascii_lowercase(), service);
     }
     let services = merged.into_values().collect::<Vec<_>>();
-    validate_final_union(&services)?;
+    super::YarrConfig {
+        services: services.clone(),
+    }
+    .validate()?;
     Ok(services)
 }
 
@@ -147,39 +179,6 @@ fn validate_source(source: &str, services: &[ServiceConfig]) -> anyhow::Result<(
             anyhow::bail!(
                 "{source} contains duplicate service names {existing:?} and {:?} (case-insensitive)",
                 service.name
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_final_union(services: &[ServiceConfig]) -> anyhow::Result<()> {
-    let reserved = [
-        "api",
-        "callTool",
-        "__yarrRun",
-        "codemode",
-        "console",
-        "globalThis",
-        "input",
-        "writeArtifact",
-    ];
-    let mut namespaces = BTreeMap::new();
-    for service in services {
-        let namespace = crate::codemode::javascript_namespace(&service.name);
-        if reserved
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&namespace))
-        {
-            anyhow::bail!(
-                "configured service {:?} collides with reserved Code Mode global {namespace:?}",
-                service.name
-            );
-        }
-        if let Some(existing) = namespaces.insert(namespace.clone(), &service.name) {
-            anyhow::bail!(
-                "Code Mode namespace collision: services {existing:?} and {:?} both map to {namespace:?}",
-                service.name,
             );
         }
     }

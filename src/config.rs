@@ -30,8 +30,8 @@ pub use services::{ServiceConfig, ServiceKind, default_data_dir, resolve_data_di
 pub(crate) use environment::install_plugin_env_overlay;
 use environment::{EnvOverlayGuard, load_env_overlay};
 pub(crate) use environment::{env_value, overlay_value};
-use fleet_file::resolve_fleet_credentials;
 pub use fleet_file::{load_fleet_file, merge_service_sources, validate_env_reference};
+use fleet_file::{merge_toml_and_fleet_services, resolve_fleet_credentials};
 use mcp::{env_bool, env_list, env_opt_str, env_parse, env_str};
 use services::{SERVICE_HOME_DIRNAME, load_services_from_env};
 
@@ -65,9 +65,29 @@ impl YarrConfig {
     /// JavaScript namespace. This validates TOML, environment, and programmatic
     /// configuration before any service can be dispatched.
     pub fn validate(&self) -> anyhow::Result<()> {
+        const RESERVED_CODEMODE_GLOBALS: &[&str] = &[
+            "api",
+            "callTool",
+            "__yarrRun",
+            "codemode",
+            "console",
+            "globalThis",
+            "input",
+            "writeArtifact",
+        ];
+
         let mut namespaces = std::collections::BTreeMap::<String, &str>::new();
         for service in &self.services {
             let namespace = crate::codemode::javascript_namespace(&service.name);
+            if RESERVED_CODEMODE_GLOBALS
+                .iter()
+                .any(|global| global.eq_ignore_ascii_case(&namespace))
+            {
+                anyhow::bail!(
+                    "configured service {:?} collides with reserved Code Mode global {namespace:?}",
+                    service.name,
+                );
+            }
             if let Some(existing) = namespaces.insert(namespace.clone(), &service.name) {
                 anyhow::bail!(
                     "Code Mode namespace collision: services {existing:?} and {:?} both map to {namespace:?}",
@@ -225,9 +245,13 @@ impl Config {
         let fleet_file = env_value("YARR_FLEET_FILE").filter(|path| !path.is_empty());
         if let Some(path) = fleet_file {
             let file_services = load_fleet_file(std::path::Path::new(&path))?;
+            let toml_and_fleet = merge_toml_and_fleet_services(
+                std::mem::take(&mut config.yarr.services),
+                file_services,
+            )?;
             let mut env_config = YarrConfig::default();
             load_services_from_env(&mut env_config)?;
-            let mut services = merge_service_sources(file_services, env_config.services)?;
+            let mut services = merge_service_sources(toml_and_fleet, env_config.services)?;
             resolve_fleet_credentials(&mut services)?;
             config.yarr.services = services;
         } else {

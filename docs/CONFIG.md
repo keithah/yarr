@@ -90,12 +90,15 @@ services:
 ```
 
 Inline `api_key`, `token`, `username`, and `password` fields are rejected,
-as are unknown fields. Environment services from `YARR_SERVICES` replace
-same-named fleet-file services case-insensitively; other entries form a
-name-sorted union. Duplicate names, normalized Code Mode namespace collisions
-(such as `home-media` and `home_media`), and reserved globals such as `api` fail
-startup. Keep URLs and reference names public; put credential values only in the
-environment overlay.
+as are unknown fields. When a fleet file is used, `config.toml` and the fleet
+file form a name-sorted union; a case-insensitive name collision between those
+two durable sources fails startup and identifies both sources. Environment
+services from `YARR_SERVICES` then replace same-named services from either
+source case-insensitively; other entries remain in the union. Duplicate names,
+normalized Code Mode namespace collisions (such as `home-media` and
+`home_media`), and reserved globals such as `api` fail startup regardless of
+whether they came from TOML, the fleet file, or the environment. Keep URLs and
+reference names public; put credential values only in the environment overlay.
 
 ## Auth Policy
 
