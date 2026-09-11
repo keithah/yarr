@@ -403,14 +403,20 @@ fn redact_json_secrets(preview: &mut String) {
                 continue;
             }
             let value_start = i; // points at the opening quote
-            // Find the closing quote (no escape handling — previews are truncated
-            // and this is best-effort log hygiene).
+            // Find the closing quote. A quote ends a JSON string only when it
+            // follows an even-length run of backslashes; odd runs escape it.
+            // Keep scanning malformed/truncated previews rather than parsing them.
             i += 1;
+            let mut backslash_run = 0;
             let mut value_end = None;
             while i < bytes.len() {
-                if bytes[i] == b'"' {
-                    value_end = Some(i + 1); // include the closing quote
-                    break;
+                match bytes[i] {
+                    b'\\' => backslash_run += 1,
+                    b'"' if backslash_run % 2 == 0 => {
+                        value_end = Some(i + 1); // include the closing quote
+                        break;
+                    }
+                    _ => backslash_run = 0,
                 }
                 i += 1;
             }

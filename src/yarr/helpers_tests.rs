@@ -189,6 +189,25 @@ fn body_preview_redacts_json_secrets_case_insensitive_and_spaced() {
 }
 
 #[test]
+fn body_preview_redacts_json_secrets_through_escaped_quotes() {
+    const ESCAPED_QUOTE_SUFFIX: &str = "JSON_ESCAPED_SUFFIX_SECRET";
+    let preview = body_preview(&format!(
+        r#"{{"accessToken":"prefix\"{ESCAPED_QUOTE_SUFFIX}"}}"#
+    ));
+    assert!(
+        !preview.contains(ESCAPED_QUOTE_SUFFIX),
+        "escaped-quote suffix leaked: {preview}"
+    );
+    assert_eq!(preview, r#"{"accessToken":[redacted]}"#);
+
+    let escaped_backslash = body_preview(r#"{"accessToken":"prefix\\","status":"ok"}"#);
+    assert_eq!(
+        escaped_backslash, r#"{"accessToken":[redacted],"status":"ok"}"#,
+        "an even backslash run must allow the quote to close the JSON string"
+    );
+}
+
+#[test]
 fn body_preview_redacts_x_api_key_json() {
     let preview = body_preview(r#"{"x-api-key":"sekret"}"#);
     assert!(!preview.contains("sekret"), "got: {preview}");

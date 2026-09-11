@@ -112,6 +112,57 @@ async fn configured_plex_pairing_http_error_redacts_whitespace_before_delimiter_
 }
 
 #[tokio::test]
+async fn configured_plex_pairing_http_error_redacts_json_escaped_quote_credential() {
+    const ESCAPED_QUOTE_SUFFIX: &str = "PAIRING_JSON_ESCAPED_SUFFIX_SECRET";
+    let app = axum::Router::new().route(
+        "/plex/identity",
+        axum::routing::get(|| async {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "application/json")],
+                format!(
+                    r#"{{"accessToken":"prefix\"{ESCAPED_QUOTE_SUFFIX}","message":"identity failed"}}"#
+                ),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "plex-main".into(),
+            kind: ServiceKind::Plex,
+            base_url: format!("http://{address}/plex"),
+            ..Default::default()
+        }],
+    };
+    let client = YarrClient::new(&config).unwrap();
+
+    let error = pair_configured_tautulli_to_plex(&client, &config.services)
+        .await
+        .expect_err("configured Plex HTTP errors must reach the pairing caller");
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains(ESCAPED_QUOTE_SUFFIX),
+        "escaped-quote credential leaked: {rendered}"
+    );
+    assert!(
+        rendered.contains("identity failed"),
+        "lost diagnosis: {rendered}"
+    );
+    assert!(
+        rendered.contains("plex-main returned HTTP 500"),
+        "configured Plex HTTP error did not reach pairing: {rendered}"
+    );
+    assert!(
+        rendered.contains("[redacted]"),
+        "missing redaction: {rendered}"
+    );
+}
+
+#[tokio::test]
 async fn pairs_identifiers_read_from_configured_tautulli_and_plex_services() {
     let app = axum::Router::new()
         .route(
