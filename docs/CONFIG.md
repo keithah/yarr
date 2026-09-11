@@ -72,6 +72,31 @@ YARR_PLEX_TOKEN=...
 
 Supported kinds: `sonarr`, `radarr`, `prowlarr`, `tautulli`, `overseerr`, `bazarr`, `tracearr`, `sabnzbd`, `qbittorrent`, `plex`, and `jellyfin`.
 
+## Public fleet files
+
+Set `YARR_FLEET_FILE` to a `.yaml`, `.yml`, or `.toml` file to declare public
+service metadata separately from credentials. The file may contain only `name`,
+`kind`, `base_url`, and credential environment-variable references
+(`api_key_env`, `token_env`, `username_env`, or `password_env`). Reference names
+must match `[A-Za-z_][A-Za-z0-9_]*`; yarr resolves them only through its installed
+environment overlay after the overlay is loaded.
+
+```yaml
+services:
+  - name: library
+    kind: sonarr
+    base_url: https://sonarr.internal
+    api_key_env: YARR_LIBRARY_API_KEY
+```
+
+Inline `api_key`, `token`, `username`, and `password` fields are rejected,
+as are unknown fields. Environment services from `YARR_SERVICES` replace
+same-named fleet-file services case-insensitively; other entries form a
+name-sorted union. Duplicate names, normalized Code Mode namespace collisions
+(such as `home-media` and `home_media`), and reserved globals such as `api` fail
+startup. Keep URLs and reference names public; put credential values only in the
+environment overlay.
+
 ## Auth Policy
 
 | State | Condition | Behavior |

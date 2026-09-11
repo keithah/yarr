@@ -1,0 +1,191 @@
+//! Strict public fleet-file parsing and source merging.
+
+use std::{collections::BTreeMap, path::Path};
+
+use serde::Deserialize;
+
+use super::{ServiceConfig, ServiceKind};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetFile {
+    services: Vec<FleetService>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetService {
+    name: String,
+    kind: ServiceKind,
+    base_url: String,
+    api_key_env: Option<String>,
+    username_env: Option<String>,
+    password_env: Option<String>,
+    token_env: Option<String>,
+}
+
+/// Load a YAML or TOML fleet file containing public metadata and environment
+/// variable *names*. The returned credential fields carry those reference names;
+/// `resolve_fleet_credentials` performs the later overlay-only resolution.
+pub fn load_fleet_file(path: &Path) -> anyhow::Result<Vec<ServiceConfig>> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("failed to read fleet file {}: {error}", path.display())
+    })?;
+    let parsed: FleetFile = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("yaml" | "yml") => serde_yaml_ng::from_str(&contents).map_err(|error| {
+            anyhow::anyhow!("failed to parse fleet file {}: {error}", path.display())
+        })?,
+        Some("toml") => toml::from_str(&contents).map_err(|error| {
+            anyhow::anyhow!("failed to parse fleet file {}: {error}", path.display())
+        })?,
+        _ => anyhow::bail!(
+            "fleet file {} must use a .yaml, .yml, or .toml extension",
+            path.display()
+        ),
+    };
+
+    let mut services = Vec::with_capacity(parsed.services.len());
+    for entry in parsed.services {
+        for (field, reference) in [
+            ("api_key_env", entry.api_key_env.as_deref()),
+            ("username_env", entry.username_env.as_deref()),
+            ("password_env", entry.password_env.as_deref()),
+            ("token_env", entry.token_env.as_deref()),
+        ] {
+            if let Some(reference) = reference {
+                validate_env_reference(reference).map_err(|error| {
+                    anyhow::anyhow!(
+                        "fleet file {} service {:?} has invalid {field}: {error}",
+                        path.display(),
+                        entry.name
+                    )
+                })?;
+            }
+        }
+        services.push(ServiceConfig {
+            name: entry.name,
+            kind: entry.kind,
+            base_url: entry.base_url,
+            api_key: entry.api_key_env,
+            username: entry.username_env,
+            password: entry.password_env,
+            token: entry.token_env,
+        });
+    }
+    validate_source("fleet file", &services)?;
+    Ok(services)
+}
+
+/// Merge public fleet-file services with environment services. Environment entries
+/// replace case-insensitive name matches; all other entries form a deterministic
+/// name-sorted union.
+pub fn merge_service_sources(
+    file: Vec<ServiceConfig>,
+    env: Vec<ServiceConfig>,
+) -> anyhow::Result<Vec<ServiceConfig>> {
+    validate_source("fleet file", &file)?;
+    validate_source("environment", &env)?;
+
+    let mut merged = BTreeMap::new();
+    for service in file {
+        merged.insert(service.name.to_ascii_lowercase(), service);
+    }
+    for service in env {
+        merged.insert(service.name.to_ascii_lowercase(), service);
+    }
+    let services = merged.into_values().collect::<Vec<_>>();
+    validate_final_union(&services)?;
+    Ok(services)
+}
+
+/// Validate an environment-variable identifier used by a fleet-file credential
+/// reference. Values are intentionally not accepted in fleet files.
+pub fn validate_env_reference(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return Err("must start with an ASCII letter or underscore".to_owned()),
+    }
+    if chars.all(|character| character.is_ascii_alphanumeric() || character == '_') {
+        Ok(())
+    } else {
+        Err("must contain only ASCII letters, digits, and underscores".to_owned())
+    }
+}
+
+pub(super) fn resolve_fleet_credentials(services: &mut [ServiceConfig]) -> anyhow::Result<()> {
+    for service in services {
+        for (field, value) in [
+            ("api_key_env", &mut service.api_key),
+            ("username_env", &mut service.username),
+            ("password_env", &mut service.password),
+            ("token_env", &mut service.token),
+        ] {
+            let Some(reference) = value.as_deref() else {
+                continue;
+            };
+            let resolved = super::overlay_value(reference).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "fleet service {:?} references {field} {reference:?}, which is not present in the installed environment overlay",
+                    service.name
+                )
+            })?;
+            *value = Some(resolved);
+        }
+    }
+    Ok(())
+}
+
+fn validate_source(source: &str, services: &[ServiceConfig]) -> anyhow::Result<()> {
+    let mut names = BTreeMap::new();
+    for service in services {
+        if service.name.trim().is_empty() {
+            anyhow::bail!("{source} contains a service with an empty name");
+        }
+        let name = service.name.to_ascii_lowercase();
+        if let Some(existing) = names.insert(name, &service.name) {
+            anyhow::bail!(
+                "{source} contains duplicate service names {existing:?} and {:?} (case-insensitive)",
+                service.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_final_union(services: &[ServiceConfig]) -> anyhow::Result<()> {
+    let reserved = [
+        "api",
+        "callTool",
+        "__yarrRun",
+        "codemode",
+        "console",
+        "globalThis",
+        "input",
+        "writeArtifact",
+    ];
+    let mut namespaces = BTreeMap::new();
+    for service in services {
+        let namespace = crate::codemode::javascript_namespace(&service.name);
+        if reserved
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&namespace))
+        {
+            anyhow::bail!(
+                "configured service {:?} collides with reserved Code Mode global {namespace:?}",
+                service.name
+            );
+        }
+        if let Some(existing) = namespaces.insert(namespace.clone(), &service.name) {
+            anyhow::bail!(
+                "Code Mode namespace collision: services {existing:?} and {:?} both map to {namespace:?}",
+                service.name,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "fleet_file_tests.rs"]
+mod tests;

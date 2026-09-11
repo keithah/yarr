@@ -48,7 +48,8 @@ pub use cli::{
 };
 pub use config::{
     AuthConfig, Config, McpConfig, ServiceConfig, ServiceKind, YarrConfig,
-    acquire_oauth_instance_lock, resolve_data_dir,
+    acquire_oauth_instance_lock, load_fleet_file, merge_service_sources, resolve_data_dir,
+    validate_env_reference,
 };
 /// Initialise dual logging for the binary: pretty colored output on stderr plus
 /// a JSON-lines file at `{data_dir}/logs/{service}.log` (non-blocking and

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod auth;
 mod environment;
+mod fleet_file;
 pub mod mcp;
 pub mod services;
 
@@ -26,9 +27,11 @@ pub use services::{ServiceConfig, ServiceKind, default_data_dir, resolve_data_di
 
 // Bring the private env helpers into this module's scope. They are used by
 // `Config::load` below and exercised by the colocated tests via `super::*`.
-pub(crate) use environment::env_value;
 pub(crate) use environment::install_plugin_env_overlay;
 use environment::{EnvOverlayGuard, load_env_overlay};
+pub(crate) use environment::{env_value, overlay_value};
+use fleet_file::resolve_fleet_credentials;
+pub use fleet_file::{load_fleet_file, merge_service_sources, validate_env_reference};
 use mcp::{env_bool, env_list, env_opt_str, env_parse, env_str};
 use services::{SERVICE_HOME_DIRNAME, load_services_from_env};
 
@@ -219,7 +222,17 @@ impl Config {
             };
         }
 
-        load_services_from_env(&mut config.yarr)?;
+        let fleet_file = env_value("YARR_FLEET_FILE").filter(|path| !path.is_empty());
+        if let Some(path) = fleet_file {
+            let file_services = load_fleet_file(std::path::Path::new(&path))?;
+            let mut env_config = YarrConfig::default();
+            load_services_from_env(&mut env_config)?;
+            let mut services = merge_service_sources(file_services, env_config.services)?;
+            resolve_fleet_credentials(&mut services)?;
+            config.yarr.services = services;
+        } else {
+            load_services_from_env(&mut config.yarr)?;
+        }
         config.yarr.validate()?;
 
         if config.mcp.static_token_scopes.is_empty() {
