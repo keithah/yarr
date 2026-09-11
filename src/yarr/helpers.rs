@@ -404,54 +404,46 @@ fn is_secret_value_delimiter(byte: u8) -> bool {
 /// on both the key and any surrounding whitespace between the colon and value.
 /// The value (including its surrounding quotes) is replaced with `[redacted]`.
 fn redact_json_secrets(preview: &mut String) {
-    let lower = preview.to_ascii_lowercase();
     // Collect (value_start, value_end) byte ranges to replace, then apply from
     // the end so earlier offsets stay valid.
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    for key in SECRET_KEYS {
-        let key_pat = format!("\"{key}\"");
-        let mut from = 0;
-        while let Some(rel) = lower[from..].find(&key_pat) {
-            let key_at = from + rel;
-            let after_key = key_at + key_pat.len();
-            from = after_key;
-            // Expect optional JSON whitespace, a colon, optional JSON whitespace, then `"`.
-            let bytes = lower.as_bytes();
-            let mut i = after_key;
-            while i < bytes.len() && is_json_ascii_whitespace(bytes[i]) {
-                i += 1;
-            }
-            if i >= bytes.len() || bytes[i] != b':' {
-                continue;
-            }
+    let bytes = preview.as_bytes();
+    let mut from = 0;
+    while let Some(key_start_rel) = bytes[from..].iter().position(|byte| *byte == b'"') {
+        let key_start = from + key_start_rel;
+        let Some(key_end) = json_string_end(bytes, key_start) else {
+            break;
+        };
+        from = key_end + 1;
+
+        let mut i = key_end + 1;
+        while i < bytes.len() && is_json_ascii_whitespace(bytes[i]) {
             i += 1;
-            while i < bytes.len() && is_json_ascii_whitespace(bytes[i]) {
-                i += 1;
-            }
-            if i >= bytes.len() || bytes[i] != b'"' {
-                continue;
-            }
-            let value_start = i; // points at the opening quote
-            // Find the closing quote. A quote ends a JSON string only when it
-            // follows an even-length run of backslashes; odd runs escape it.
-            // Keep scanning malformed/truncated previews rather than parsing them.
-            i += 1;
-            let mut backslash_run = 0;
-            let mut value_end = None;
-            while i < bytes.len() {
-                match bytes[i] {
-                    b'\\' => backslash_run += 1,
-                    b'"' if backslash_run % 2 == 0 => {
-                        value_end = Some(i + 1); // include the closing quote
-                        break;
-                    }
-                    _ => backslash_run = 0,
-                }
-                i += 1;
-            }
-            let end = value_end.unwrap_or(preview.len());
-            ranges.push((value_start, end));
         }
+        if i >= bytes.len() || bytes[i] != b':' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && is_json_ascii_whitespace(bytes[i]) {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'"' {
+            continue;
+        }
+
+        let Some(key) = decode_json_key(&preview[key_start + 1..key_end]) else {
+            continue;
+        };
+        if !SECRET_KEYS
+            .iter()
+            .any(|secret| key.eq_ignore_ascii_case(secret))
+        {
+            continue;
+        }
+
+        // Keep scanning malformed/truncated previews rather than parsing them.
+        let value_end = json_string_end(bytes, i).map_or(preview.len(), |end| end + 1);
+        ranges.push((i, value_end));
     }
     ranges.sort_unstable();
     // Merge overlapping/adjacent ranges so a value matched by two keys (or nested
@@ -470,6 +462,77 @@ fn redact_json_secrets(preview: &mut String) {
             preview.replace_range(start..end, "[redacted]");
         }
     }
+}
+
+/// Returns the byte offset of a JSON string's closing quote. Quotes preceded by
+/// an odd-length backslash run are escaped and remain part of the string.
+fn json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    let mut backslash_run = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => backslash_run += 1,
+            b'"' if backslash_run % 2 == 0 => return Some(i),
+            _ => backslash_run = 0,
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Decodes a quoted JSON key without requiring the enclosing object to parse.
+/// Invalid escapes reject the token, keeping malformed non-JSON text from being
+/// mistaken for a credential-bearing JSON member.
+fn decode_json_key(key: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(key.len());
+    let mut chars = key.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            if ch.is_control() {
+                return None;
+            }
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            '/' => decoded.push('/'),
+            'b' => decoded.push('\u{0008}'),
+            'f' => decoded.push('\u{000C}'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            'u' => {
+                let code_unit = decode_json_hex(&mut chars)?;
+                let scalar = if (0xD800..=0xDBFF).contains(&code_unit) {
+                    if chars.next()? != '\\' || chars.next()? != 'u' {
+                        return None;
+                    }
+                    let low = decode_json_hex(&mut chars)?;
+                    if !(0xDC00..=0xDFFF).contains(&low) {
+                        return None;
+                    }
+                    0x1_0000 + ((code_unit - 0xD800) << 10) + (low - 0xDC00)
+                } else if (0xDC00..=0xDFFF).contains(&code_unit) {
+                    return None;
+                } else {
+                    code_unit
+                };
+                decoded.push(char::from_u32(scalar)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+fn decode_json_hex(chars: &mut std::str::Chars<'_>) -> Option<u32> {
+    let mut value = 0;
+    for _ in 0..4 {
+        value = (value << 4) | chars.next()?.to_digit(16)?;
+    }
+    Some(value)
 }
 
 fn is_json_ascii_whitespace(byte: u8) -> bool {

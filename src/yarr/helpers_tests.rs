@@ -275,6 +275,18 @@ fn body_preview_redacts_truncated_json_with_scanner_fallback() {
 }
 
 #[test]
+fn body_preview_redacts_truncated_json_with_escaped_secret_key() {
+    const ESCAPED_KEY_SECRET: &str = "TRUNCATED_ESCAPED_KEY_UNIQUE_SECRET";
+    let preview = body_preview(&format!(r#"{{"access\u0054oken":"{ESCAPED_KEY_SECRET}"#));
+
+    assert!(
+        !preview.contains(ESCAPED_KEY_SECRET),
+        "escaped-key truncated JSON credential leaked: {preview}"
+    );
+    assert!(preview.contains("[redacted]"), "got: {preview}");
+}
+
+#[test]
 fn body_preview_redacts_x_api_key_json() {
     let preview = body_preview(r#"{"x-api-key":"sekret"}"#);
     assert!(!preview.contains("sekret"), "got: {preview}");
