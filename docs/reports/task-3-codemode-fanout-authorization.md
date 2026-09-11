@@ -84,3 +84,35 @@ cargo clippy --all-targets -- -D warnings
 The focused regression uses real Code Mode scripts: a four-target script is rejected
 at a cap of three without host dispatch, while a one-target script on the same
 four-service fleet produces only `["sonarr"]` for authorization.
+
+## Follow-up repair: saved snippets and bounded preflight admission
+
+The preflight previously ran in `execute_tool` before `YarrService::run_script`.
+That bypassed Code Mode's source-size check and semaphore admission, and the top-level
+`codemode.run(...)` plan saw only `snippet_run`, not the saved source it executes.
+
+### RED evidence
+
+```sh
+cargo test guarded_codemode_rejects_oversize_code_before_preflight --lib
+cargo test guarded_saved_snippet_preflights_its_loaded_source_before_execution --lib
+```
+
+Both initially exited `101` with `E0407`: `preflight` was not a member of
+`CodeModeCallGuard`. The tests therefore established the missing guarded execution
+boundary before production changes.
+
+### GREEN evidence
+
+```sh
+cargo fmt --check
+cargo test mcp::tools --lib
+cargo test app::codemode --lib
+cargo clippy --all-targets -- -D warnings
+```
+
+All commands exited `0`. The focused suites reported 8 MCP-tools tests and 28 Code
+Mode tests passing. The added coverage proves an oversized guarded source never enters
+preflight, a preflight retains the sole configured admission permit until it completes,
+a guarded saved snippet preflights its loaded source, and `codemode.run(...)` expands a
+saved destructive snippet to its actual `sonarr` target before authorization.

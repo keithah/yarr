@@ -139,6 +139,30 @@ fn codemode_preflight_authorizes_only_the_actual_target_not_the_configured_fleet
     );
 }
 
+#[test]
+fn codemode_run_preflight_expands_destructive_saved_snippet_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let service = four_service_codemode_service().with_data_dir(tmp.path().to_path_buf());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(service.snippet_save(
+            "remove-series",
+            r#"async () => api.sonarr.delete("/api/v3/series/1")"#,
+            None,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        super::codemode_script_destructive_targets(
+            &service,
+            r#"async () => codemode.run("remove-series", {})"#,
+            3,
+        )
+        .expect("saved source is planned before authorization"),
+        vec!["sonarr"],
+    );
+}
+
 #[tokio::test]
 async fn read_authorized_codemode_cannot_invoke_local_file_writer() {
     let _command = install_test_curated_command(CommandDescriptor {

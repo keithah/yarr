@@ -54,6 +54,7 @@ pub type ArtifactWriter = Box<dyn Fn(&str, &str, &str) -> Result<String, String>
 pub type EmbedCaller = Box<dyn Fn(&str) -> Result<String, String> + Send>;
 
 /// Resource limits for one execution.
+#[derive(Clone)]
 pub struct EngineLimits {
     pub memory_bytes: usize,
     pub stack_bytes: usize,

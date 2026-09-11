@@ -46,6 +46,19 @@ use runtime::{ActiveRunMetric, ArtifactRequest, EmbedRequest, ToolRequest};
 /// MCP-supplied defense-in-depth policy for every action emitted by a Code
 /// Mode script. CLI runs use no guard and retain their local-trust behavior.
 pub(crate) trait CodeModeCallGuard: Send + Sync {
+    /// Authorize the complete source before it reaches QuickJS. This runs after
+    /// Code Mode's input-size check and execution-slot admission, so planning
+    /// cannot bypass either bound.
+    fn preflight<'a>(
+        &'a self,
+        _service: &'a YarrService,
+        _code: &'a str,
+        _input_json: Option<&'a str>,
+        _limits: EngineLimits,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn authorize<'a>(
         &'a self,
         action: &'a YarrAction,
@@ -117,6 +130,12 @@ impl YarrService {
             stack_bytes: CODEMODE_STACK_LIMIT,
             deadline: deadline.instant.into_std(),
         };
+        if let Some(guard) = guard.as_ref() {
+            guard
+                .preflight(self, &code, input_json.as_deref(), limits.clone())
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
 
         // Per-run artifacts dir, computed host-side (the engine never reads a clock).
         // `None` when no artifacts root is configured → `writeArtifact` errors.

@@ -218,3 +218,125 @@ async fn codemode_api_client_delete_dispatches() {
     assert!(!result.contains("destructive"), "got: {result}");
     assert_eq!(out["calls"][0]["action"], "api_delete");
 }
+
+struct PreflightRecordingGuard {
+    calls: std::sync::Arc<std::sync::Mutex<usize>>,
+}
+
+impl super::CodeModeCallGuard for PreflightRecordingGuard {
+    fn authorize<'a>(
+        &'a self,
+        _action: &'a crate::actions::YarrAction,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn preflight<'a>(
+        &'a self,
+        _service: &'a crate::app::YarrService,
+        _code: &'a str,
+        _input_json: Option<&'a str>,
+        _limits: crate::codemode::EngineLimits,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let calls = std::sync::Arc::clone(&self.calls);
+        Box::pin(async move {
+            *calls.lock().expect("preflight call counter is available") += 1;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn guarded_codemode_rejects_oversize_code_before_preflight() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let guard = std::sync::Arc::new(PreflightRecordingGuard {
+        calls: std::sync::Arc::clone(&calls),
+    });
+    let code = format!(
+        "async () => 1 // {}",
+        "x".repeat(crate::codemode::CODEMODE_MAX_CODE_BYTES)
+    );
+
+    let error = loopback_state()
+        .service
+        .codemode_with_guard(&code, guard)
+        .await
+        .expect_err("oversized Code Mode input must not reach preflight");
+
+    assert!(error.to_string().contains("limit is"), "{error}");
+    assert_eq!(*calls.lock().unwrap(), 0, "preflight must not run");
+}
+
+struct BlockingPreflightGuard {
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl super::CodeModeCallGuard for BlockingPreflightGuard {
+    fn authorize<'a>(
+        &'a self,
+        _action: &'a crate::actions::YarrAction,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn preflight<'a>(
+        &'a self,
+        _service: &'a crate::app::YarrService,
+        _code: &'a str,
+        _input_json: Option<&'a str>,
+        _limits: crate::codemode::EngineLimits,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let _ = self.entered.send(());
+        let release = self
+            .release
+            .lock()
+            .expect("release state is available")
+            .take()
+            .expect("preflight runs once");
+        Box::pin(async move {
+            let _ = release.await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn guarded_preflight_holds_the_codemode_admission_slot() {
+    let service = loopback_state().service.with_codemode_limits(
+        1,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(1),
+    );
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let first = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .codemode_with_guard(
+                    "async () => 1",
+                    std::sync::Arc::new(BlockingPreflightGuard {
+                        entered: entered_tx,
+                        release: std::sync::Mutex::new(Some(release_rx)),
+                    }),
+                )
+                .await
+        }
+    });
+    entered_rx.recv().await.expect("first preflight entered");
+
+    let error = service
+        .codemode_with_guard(
+            "async () => 1",
+            std::sync::Arc::new(PreflightRecordingGuard {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            }),
+        )
+        .await
+        .expect_err("a preflight in the only slot must enforce queue timeout");
+    assert!(error.to_string().contains("codemode is busy"), "{error}");
+
+    release_tx.send(()).expect("first preflight is waiting");
+    first.await.unwrap().unwrap();
+}

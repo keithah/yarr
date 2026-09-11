@@ -31,11 +31,6 @@ pub(super) async fn execute_tool(
             auth,
             destructive_authorized_targets: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         });
-        if name == YARR_TOOL_NAME
-            && let Some(code) = args.get("code").and_then(Value::as_str)
-        {
-            guard.authorize_script(code).await?;
-        }
         return dispatch_script_with_guard(state, name, args, guard).await;
     }
     dispatch_tool(state, name, args).await
@@ -133,35 +128,58 @@ pub(crate) fn authorize_codemode_action_scopes(
     Ok(())
 }
 
-impl McpCodeModeGuard {
-    async fn authorize_script(&self, code: &str) -> anyhow::Result<()> {
-        let targets = codemode_script_destructive_targets(
-            &self.state.service,
-            code,
-            self.state.config.destructive_fanout_max,
-        )
-        .map_err(anyhow::Error::msg)?;
-        if targets.is_empty() {
-            return Ok(());
-        }
-        if self.peer.supported_elicitation_modes().is_empty() {
-            anyhow::bail!(
-                "destructive Code Mode script requires an elicitation-capable MCP client; nothing changed"
-            );
-        }
-        if super::elicit::gate_destructive(&self.peer, "codemode", &targets).await
-            == super::elicit::DeleteGate::Declined
-        {
-            anyhow::bail!("destructive Code Mode script was not confirmed; nothing changed");
-        }
-        *self.destructive_authorized_targets.lock().map_err(|_| {
-            anyhow::anyhow!("Code Mode destructive authorization state is unavailable")
-        })? = targets.into_iter().collect();
-        Ok(())
-    }
-}
-
 impl CodeModeCallGuard for McpCodeModeGuard {
+    fn preflight<'a>(
+        &'a self,
+        service: &'a crate::app::YarrService,
+        code: &'a str,
+        _input_json: Option<&'a str>,
+        limits: crate::codemode::EngineLimits,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let targets = codemode_script_destructive_targets_with_limits(
+                service,
+                code,
+                &limits,
+                self.state.config.destructive_fanout_max,
+            )?;
+            if targets.is_empty() {
+                return Ok(());
+            }
+            let existing = self
+                .destructive_authorized_targets
+                .lock()
+                .map_err(|_| "Code Mode destructive authorization state is unavailable".to_owned())?
+                .clone();
+            if targets.iter().all(|target| existing.contains(target)) {
+                return Ok(());
+            }
+            let targets = existing
+                .into_iter()
+                .chain(targets)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if self.peer.supported_elicitation_modes().is_empty() {
+                return Err(
+                    "destructive Code Mode script requires an elicitation-capable MCP client; nothing changed"
+                        .to_owned(),
+                );
+            }
+            if super::elicit::gate_destructive(&self.peer, "codemode", &targets).await
+                == super::elicit::DeleteGate::Declined
+            {
+                return Err(
+                    "destructive Code Mode script was not confirmed; nothing changed".to_owned(),
+                );
+            }
+            *self.destructive_authorized_targets.lock().map_err(|_| {
+                "Code Mode destructive authorization state is unavailable".to_owned()
+            })? = targets.into_iter().collect();
+            Ok(())
+        })
+    }
+
     fn authorize<'a>(
         &'a self,
         action: &'a YarrAction,
@@ -195,6 +213,7 @@ impl CodeModeCallGuard for McpCodeModeGuard {
 /// Run a Code Mode script in a non-dispatching QuickJS preflight and derive its
 /// destructive targets from the bridge calls it actually reaches. This preserves
 /// the engine's JavaScript semantics instead of attempting to parse source text.
+#[cfg(test)]
 pub(crate) fn codemode_script_destructive_targets(
     service: &crate::app::YarrService,
     code: &str,
@@ -205,8 +224,16 @@ pub(crate) fn codemode_script_destructive_targets(
         stack_bytes: crate::codemode::CODEMODE_STACK_LIMIT,
         deadline: std::time::Instant::now() + crate::codemode::CODEMODE_TIMEOUT,
     };
-    let calls =
-        crate::codemode::plan_tool_calls(code, &service.codemode_preamble(), &limits, None)?;
+    codemode_script_destructive_targets_with_limits(service, code, &limits, fanout_max)
+}
+
+fn codemode_script_destructive_targets_with_limits(
+    service: &crate::app::YarrService,
+    code: &str,
+    limits: &crate::codemode::EngineLimits,
+    fanout_max: usize,
+) -> Result<Vec<String>, String> {
+    let calls = crate::codemode::plan_tool_calls(code, &service.codemode_preamble(), limits, None)?;
     let mut targets = Vec::new();
     for call in calls {
         let mut args: Map<String, Value> = serde_json::from_str(&call.params_json)
@@ -214,7 +241,30 @@ pub(crate) fn codemode_script_destructive_targets(
         args.insert("action".to_owned(), Value::String(call.id));
         let action =
             YarrAction::from_mcp_args(&Value::Object(args)).map_err(|error| error.to_string())?;
-        if destructive_script_action(service, &action)
+        if let YarrAction::SnippetRun { name, input } = &action {
+            let source = service
+                .snippet_source_for_preflight(name)
+                .map_err(|error| error.to_string())?;
+            let input_json = serde_json::to_string(input)
+                .map_err(|error| format!("snippet input is not serializable as JSON: {error}"))?;
+            for nested in crate::codemode::plan_tool_calls(
+                &source,
+                &service.codemode_preamble(),
+                limits,
+                Some(&input_json),
+            )? {
+                let mut nested_args: Map<String, Value> = serde_json::from_str(&nested.params_json)
+                    .map_err(|error| format!("invalid params for `{}`: {error}", nested.id))?;
+                nested_args.insert("action".to_owned(), Value::String(nested.id));
+                let nested_action = YarrAction::from_mcp_args(&Value::Object(nested_args))
+                    .map_err(|error| error.to_string())?;
+                if destructive_script_action(service, &nested_action)
+                    && let Some(service) = script_action_service(&nested_action)
+                {
+                    targets.push(service.to_owned());
+                }
+            }
+        } else if destructive_script_action(service, &action)
             && let Some(service) = script_action_service(&action)
         {
             targets.push(service.to_owned());
