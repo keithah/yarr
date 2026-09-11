@@ -90,25 +90,53 @@ async fn fleet_readonly_rejects_generated_post_before_transport() {
     assert!(error.to_string().contains("YARR_FLEET_READONLY"));
 }
 
+fn four_service_codemode_service() -> crate::app::YarrService {
+    let config = crate::config::YarrConfig {
+        services: [
+            ("sonarr", crate::config::ServiceKind::Sonarr),
+            ("radarr", crate::config::ServiceKind::Radarr),
+            ("plex", crate::config::ServiceKind::Plex),
+            ("jellyfin", crate::config::ServiceKind::Jellyfin),
+        ]
+        .into_iter()
+        .map(|(name, kind)| crate::config::ServiceConfig {
+            name: name.to_owned(),
+            kind,
+            base_url: "http://localhost:1".into(),
+            api_key: Some("test".into()),
+            ..Default::default()
+        })
+        .collect(),
+    };
+    let client = crate::yarr::YarrClient::new(&config).expect("stub client builds");
+    crate::app::YarrService::new(client, config)
+}
+
 #[test]
-fn codemode_destructive_targets_cover_the_entire_configured_fleet_before_eliciting() {
+fn codemode_preflight_rejects_four_actual_destructive_targets_before_dispatch() {
+    let service = four_service_codemode_service();
+    let code = r#"async () => {
+        await api.sonarr.delete("/api/v3/series/1");
+        await api.radarr.delete("/api/v3/movie/2");
+        await api.plex.delete("/library/metadata/3");
+        await api.jellyfin.delete("/Items/4");
+    }"#;
+
+    let error = super::codemode_script_destructive_targets(&service, code, 3)
+        .expect_err("four actual destructive script targets must fail before dispatch");
+    assert!(error.contains("maximum is 3"), "{error}");
+}
+
+#[test]
+fn codemode_preflight_authorizes_only_the_actual_target_not_the_configured_fleet() {
+    let service = four_service_codemode_service();
+    let code = r#"async () => api.sonarr.delete("/api/v3/series/1")"#;
+
     assert_eq!(
-        super::codemode_destructive_targets(&["sonarr".to_owned()], 3)
-            .expect("one target is within the cap"),
+        super::codemode_script_destructive_targets(&service, code, 3)
+            .expect("one actual target is within the cap"),
         vec!["sonarr"],
     );
-
-    let error = super::codemode_destructive_targets(
-        &[
-            "sonarr".to_owned(),
-            "radarr".to_owned(),
-            "plex".to_owned(),
-            "jellyfin".to_owned(),
-        ],
-        3,
-    )
-    .expect_err("a four-target Code Mode destructive run must fail before elicitation");
-    assert!(error.contains("maximum is 3"));
 }
 
 #[tokio::test]

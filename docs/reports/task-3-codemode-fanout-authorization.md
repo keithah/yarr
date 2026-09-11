@@ -55,3 +55,32 @@ cargo fmt --check && cargo test mcp::elicit --lib && cargo test mcp::rmcp_server
 ```
 
 Its test totals were 7 elicitation, 24 RMCP server, 6 MCP tools, and 43 configuration tests: all passed.
+
+## Follow-up repair: actual script targets
+
+The initial repair was too broad: it aggregated every configured service, not the
+services reached by destructive calls in the submitted script. Code Mode now runs a
+non-dispatching QuickJS preflight, records actual bridge calls, parses them with the
+normal `YarrAction` parser, sorts/deduplicates destructive service targets, and applies
+the fan-out cap before one MCP elicitation. The real execution still reauthorizes every
+inner call and rejects a destructive call that was not preflight-authorized.
+
+RED evidence:
+
+```sh
+cargo test mcp::tools::tests::codemode_preflight --lib
+# exit 101: codemode_script_destructive_targets was absent
+```
+
+GREEN evidence:
+
+```sh
+cargo fmt --check
+cargo test mcp::tools::tests::codemode_preflight --lib
+cargo test --lib
+cargo clippy --all-targets -- -D warnings
+```
+
+The focused regression uses real Code Mode scripts: a four-target script is rejected
+at a cap of three without host dispatch, while a one-target script on the same
+four-service fleet produces only `["sonarr"]` for authorization.
