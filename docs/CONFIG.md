@@ -75,9 +75,10 @@ Supported kinds: `sonarr`, `radarr`, `prowlarr`, `tautulli`, `overseerr`, `bazar
 ## Public fleet files
 
 Set `YARR_FLEET_FILE` to a `.yaml`, `.yml`, or `.toml` file to declare public
-service metadata separately from credentials. The file may contain only `name`,
-`kind`, `base_url`, and credential environment-variable references
-(`api_key_env`, `token_env`, `username_env`, or `password_env`). Reference names
+service metadata separately from credentials. The file may contain `name`, `kind`,
+`base_url`, credential environment-variable references (`api_key_env`, `token_env`,
+`username_env`, or `password_env`), and the public Plex discovery drift metadata
+`client_identifier` and `relay_only`. Reference names
 must match `[A-Za-z_][A-Za-z0-9_]*`; yarr resolves them only through its installed
 environment overlay after the overlay is loaded.
 

@@ -136,6 +136,36 @@ fn inline_token_is_rejected_without_echoing_a_value() {
 }
 
 #[test]
+fn config_loads_exact_public_plex_discovery_output() {
+    let fixture = write_fixture(
+        "yaml",
+        "services:\n  - name: plex_library\n    kind: plex\n    client_identifier: stable-server-id\n    base_url: https://server.invalid\n    token_env: YARR_PLEX_LIBRARY_TOKEN\n    relay_only: false\n",
+    );
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".env"),
+        "YARR_PLEX_LIBRARY_TOKEN=discovery-secret\n",
+    )
+    .unwrap();
+    let mut env = crate::testing::TestEnv::new();
+    env.set("YARR_HOME", home.path());
+    env.set("HOME", home.path());
+    env.set("YARR_FLEET_FILE", fixture.path());
+    env.remove("YARR_SERVICES");
+    env.remove("YARR_PLEX_LIBRARY_TOKEN");
+
+    let loaded = Config::load().expect("exact discovery YAML must load");
+
+    assert_eq!(loaded.yarr.services.len(), 1);
+    assert_eq!(loaded.yarr.services[0].name, "plex_library");
+    assert_eq!(loaded.yarr.services[0].kind, ServiceKind::Plex);
+    assert_eq!(
+        loaded.yarr.services[0].token.as_deref(),
+        Some("discovery-secret")
+    );
+}
+
+#[test]
 fn config_loads_fleet_after_overlay_and_replaces_file_with_environment_service() {
     let fixture = write_fixture(
         "yaml",

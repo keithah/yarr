@@ -17,7 +17,12 @@ struct FleetFile {
 struct FleetService {
     name: String,
     kind: ServiceKind,
+    /// Stable public Plex identity retained in discovery-generated fleet files
+    /// for later drift comparison; it is never treated as a credential.
+    client_identifier: Option<String>,
     base_url: String,
+    /// Public Plex connection-selection state retained for drift comparison.
+    relay_only: Option<bool>,
     api_key_env: Option<String>,
     username_env: Option<String>,
     password_env: Option<String>,
@@ -46,6 +51,10 @@ pub fn load_fleet_file(path: &Path) -> anyhow::Result<Vec<ServiceConfig>> {
 
     let mut services = Vec::with_capacity(parsed.services.len());
     for entry in parsed.services {
+        // Discovery owns drift state by re-reading its public fleet file. Parse
+        // these fields here so that same file remains usable runtime config;
+        // they deliberately never enter credential resolution or service auth.
+        let _ = (&entry.client_identifier, entry.relay_only);
         for (field, reference) in [
             ("api_key_env", entry.api_key_env.as_deref()),
             ("username_env", entry.username_env.as_deref()),
