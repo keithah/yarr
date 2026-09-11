@@ -122,16 +122,10 @@ impl ServerHandler for YarrRmcpServer {
         // signature.
         let peer: Peer<RoleServer> = context.peer.clone();
 
-        // Destructive-delete gate (MCP-only). Before a destructive action
-        // dispatches, ask the connected client to confirm via elicitation. The
-        // tool name IS the service name (the MCP tool is service-named; `action`
-        // is a parameter). `action_is_destructive` only recognizes literal
-        // destructive action names — it has no notion of `op`'s underlying HTTP
-        // method — so a generated DELETE op dispatched via `action=op` (reachable
-        // directly here in `flat` tool mode; in `codemode` mode `op` is only ever
-        // called from inside a script, which never reaches `call_tool` at all —
-        // see `codemode_dispatch`) is checked separately by
-        // `is_destructive_op_call`.
+        // MCP-only elicitation gate. Curated destructive actions use registry
+        // metadata; generated operations use the authoritative safety classifier,
+        // so DELETE defaults and audited non-DELETE destructive writes are gated
+        // before dispatch.
         if (crate::actions::action_is_destructive(&action)
             || (action == "op" && is_destructive_op_call(&self.state, &tool_name, &arguments)))
             && elicit::gate_destructive(&peer, &action, &tool_name).await

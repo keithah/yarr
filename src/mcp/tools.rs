@@ -170,18 +170,18 @@ fn destructive_inner_call<'a>(state: &AppState, action: &'a YarrAction) -> (bool
             .unwrap_or(YARR_TOOL_NAME),
         _ => YARR_TOOL_NAME,
     };
-    let generated_delete = match action {
+    let generated_elicitation = match action {
         YarrAction::Op { service, op, .. } => state
             .service
             .kind_of(service)
             .ok()
             .flatten()
-            .and_then(|kind| crate::openapi::find_operation(kind, op))
-            .is_some_and(|spec| spec.method.is_delete()),
+            .and_then(|kind| crate::openapi::safety::operation_safety(kind, op))
+            .is_some_and(|safety| safety.elicitation_required),
         _ => false,
     };
     (
-        crate::actions::action_is_destructive(action.name()) || generated_delete,
+        crate::actions::action_is_destructive(action.name()) || generated_elicitation,
         service,
     )
 }
