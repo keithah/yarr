@@ -123,9 +123,12 @@ The fleet YAML contains only public service metadata (`name`, `kind`,
 `client_identifier` and selected `relay_only` state are required so future
 `--diff` runs can identify renames and relay-state changes correctly. The separate
 secret env file is atomically written at mode `0600`; do not commit it. Discovery
-output and logs never include the token or an authenticated URL. Run live discovery
-only with explicit supervision and read-only credentials; fixture coverage does not
-substitute for live acceptance.
+output and logs never include the token or an authenticated URL. The command's JSON
+output contains separate `discovery` and `pairing` objects. `pairing` reads only
+configured Tautulli and Plex identifiers, reports exact/ambiguous/unpaired matches,
+and performs no persistence or plex.tv request. Run live discovery only with explicit
+supervision and read-only credentials; fixture coverage does not substitute for live
+acceptance.
 
 ## Auth Policy
 
