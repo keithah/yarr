@@ -5,7 +5,13 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::{Result, anyhow};
 use serde::Serialize;
+
+use crate::{
+    config::{ServiceConfig, ServiceKind},
+    yarr::YarrClient,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TautulliIdentity {
@@ -83,6 +89,67 @@ pub fn pair_tautulli_to_plex(
         }
     }
     report
+}
+
+/// Read the identifier each configured Tautulli and Plex instance reports, then
+/// pair exact matches. This is read-only: it contacts only the local configured
+/// services, never persists data, and never calls plex.tv.
+pub async fn pair_configured_tautulli_to_plex(
+    client: &YarrClient,
+    services: &[ServiceConfig],
+) -> Result<PairingReport> {
+    let mut tautulli = Vec::new();
+    let mut plex = Vec::new();
+
+    for service in services {
+        match service.kind {
+            ServiceKind::Tautulli => {
+                let response = client
+                    .get_json(service, "/api/v2?cmd=get_server_info")
+                    .await?;
+                let pms_identifier = required_string(
+                    &response,
+                    "/response/data/pms_identifier",
+                    &service.name,
+                    "Tautulli pms_identifier",
+                )?;
+                tautulli.push(TautulliIdentity {
+                    service: service.name.clone(),
+                    pms_identifier,
+                });
+            }
+            ServiceKind::Plex => {
+                let response = client.get_json(service, "/identity").await?;
+                let client_identifier = required_string(
+                    &response,
+                    "/MediaContainer/machineIdentifier",
+                    &service.name,
+                    "Plex machineIdentifier",
+                )?;
+                plex.push(PlexIdentity {
+                    service: service.name.clone(),
+                    client_identifier,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(pair_tautulli_to_plex(&tautulli, &plex))
+}
+
+fn required_string(
+    response: &serde_json::Value,
+    pointer: &str,
+    service: &str,
+    field: &str,
+) -> Result<String> {
+    response
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("{service} response is missing {field}"))
 }
 
 #[cfg(test)]

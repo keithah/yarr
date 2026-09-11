@@ -118,11 +118,14 @@ shared servers. It ranks usable connections local first, then direct HTTPS, then
 relay; relay-only selections are reported. `--diff` reports typed added, removed,
 renamed, URL, and relay-state drift and writes neither target.
 
-The fleet YAML contains only public service metadata (`name`, `kind`, `base_url`,
-and `token_env`). The separate secret env file is atomically written at mode
-`0600`; do not commit it. Discovery output and logs never include the token or an
-authenticated URL. Run live discovery only with explicit supervision and
-read-only credentials; fixture coverage does not substitute for live acceptance.
+The fleet YAML contains only public service metadata (`name`, `kind`,
+`client_identifier`, `base_url`, `token_env`, and `relay_only`). The stable Plex
+`client_identifier` and selected `relay_only` state are required so future
+`--diff` runs can identify renames and relay-state changes correctly. The separate
+secret env file is atomically written at mode `0600`; do not commit it. Discovery
+output and logs never include the token or an authenticated URL. Run live discovery
+only with explicit supervision and read-only credentials; fixture coverage does not
+substitute for live acceptance.
 
 ## Auth Policy
 

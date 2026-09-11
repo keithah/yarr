@@ -120,6 +120,142 @@ fn public_and_secret_outputs_are_separate_and_secret_is_owner_only() {
 }
 
 #[test]
+fn secret_output_ignores_precreated_predictable_temp_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.yaml");
+    let secret = temp.path().join("plex.env");
+    let victim = temp.path().join("victim");
+    fs::write(&victim, "untouched").unwrap();
+    let predictable = temp
+        .path()
+        .join(format!(".plex.env.{}.tmp", std::process::id()));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&victim, &predictable).unwrap();
+
+    let report = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_one".into(),
+            client_identifier: "id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_ONE_TOKEN".into(),
+            relay_only: false,
+            access_token: "secret".into(),
+        }],
+        drift: Vec::new(),
+    };
+    write_discovery_outputs(&fleet, &secret, &report).unwrap();
+
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+    assert_eq!(
+        fs::read_to_string(&secret).unwrap(),
+        "YARR_PLEX_ONE_TOKEN=secret\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn secret_output_replaces_a_permissive_destination_with_owner_only_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.yaml");
+    let secret = temp.path().join("plex.env");
+    fs::write(&secret, "YARR_OLD_TOKEN=old\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let report = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_one".into(),
+            client_identifier: "id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_ONE_TOKEN".into(),
+            relay_only: false,
+            access_token: "secret".into(),
+        }],
+        drift: Vec::new(),
+    };
+
+    write_discovery_outputs(&fleet, &secret, &report).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&secret).unwrap(),
+        "YARR_PLEX_ONE_TOKEN=secret\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn persisted_output_preserves_identity_and_relay_state_for_drift_detection() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.yaml");
+    let secret = temp.path().join("plex.env");
+    let persisted = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_old_name".into(),
+            client_identifier: "stable-server-id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_OLD_NAME_TOKEN".into(),
+            relay_only: false,
+            access_token: "never-in-public-output".into(),
+        }],
+        drift: Vec::new(),
+    };
+    write_discovery_outputs(&fleet, &secret, &persisted).unwrap();
+
+    let previous = read_existing_report(&fleet).unwrap();
+    let current = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_new_name".into(),
+            client_identifier: "stable-server-id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_NEW_NAME_TOKEN".into(),
+            relay_only: true,
+            access_token: String::new(),
+        }],
+        drift: Vec::new(),
+    };
+    let drift = classify_drift(&previous, &current);
+
+    assert!(drift.iter().any(|change| matches!(
+        change,
+        Drift::Renamed { client_identifier, from, to }
+            if client_identifier == "stable-server-id"
+                && from == "plex_old_name"
+                && to == "plex_new_name"
+    )));
+    assert!(drift.iter().any(|change| matches!(
+        change,
+        Drift::RelayStateChanged { name, from: false, to: true }
+            if name == "plex_new_name"
+    )));
+    assert!(
+        !drift
+            .iter()
+            .any(|change| matches!(change, Drift::Added { .. } | Drift::Removed { .. }))
+    );
+
+    let public = fs::read_to_string(&fleet).unwrap();
+    assert!(public.contains("client_identifier: stable-server-id"));
+    assert!(public.contains("relay_only: false"));
+    assert!(!public.contains("never-in-public-output"));
+}
+
+#[test]
 fn diff_reports_typed_drift_without_writing_files() {
     let temp = tempfile::tempdir().unwrap();
     let fleet = temp.path().join("fleet.yaml");

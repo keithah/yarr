@@ -122,6 +122,7 @@ rquickjs = "0.12"
 # Errors
 anyhow = "1"
 thiserror = "2"
+tempfile = "3"
 
 [profile.dev]
 # CI recompiles from scratch on every job (CARGO_INCREMENTAL=0 is required
@@ -151,7 +152,6 @@ test-support = []
 
 [dev-dependencies]
 yarr = { path = ".", features = ["test-support"] }
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 rmcp = { workspace = true, features = [
   "client",

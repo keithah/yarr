@@ -1,4 +1,8 @@
 use super::*;
+use crate::{
+    config::{ServiceConfig, ServiceKind, YarrConfig},
+    yarr::YarrClient,
+};
 
 fn tautulli(service: &str, id: &str) -> TautulliIdentity {
     TautulliIdentity {
@@ -47,4 +51,63 @@ fn duplicate_identifier_is_ambiguous_and_not_paired() {
     assert_eq!(report.ambiguous[0].identifier, "duplicate");
     assert_eq!(report.unpaired_tautulli.len(), 2);
     assert_eq!(report.unpaired_plex.len(), 1);
+}
+
+#[tokio::test]
+async fn pairs_identifiers_read_from_configured_tautulli_and_plex_services() {
+    let app = axum::Router::new()
+        .route(
+            "/tautulli/api/v2",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "response": {
+                        "result": "success",
+                        "data": { "pms_identifier": "server-identifier" }
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/plex/identity",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "MediaContainer": { "machineIdentifier": "server-identifier" }
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = YarrConfig {
+        services: vec![
+            ServiceConfig {
+                name: "tautulli-main".into(),
+                kind: ServiceKind::Tautulli,
+                base_url: format!("http://{address}/tautulli"),
+                ..Default::default()
+            },
+            ServiceConfig {
+                name: "plex-main".into(),
+                kind: ServiceKind::Plex,
+                base_url: format!("http://{address}/plex"),
+                ..Default::default()
+            },
+        ],
+    };
+    let client = YarrClient::new(&config).unwrap();
+
+    let report = pair_configured_tautulli_to_plex(&client, &config.services)
+        .await
+        .expect("configured identity reads must pair exactly");
+    assert_eq!(
+        report.pairs,
+        vec![Pair {
+            tautulli_service: "tautulli-main".into(),
+            plex_service: "plex-main".into(),
+        }]
+    );
+    assert!(report.unpaired_tautulli.is_empty());
+    assert!(report.unpaired_plex.is_empty());
+    assert!(report.ambiguous.is_empty());
 }

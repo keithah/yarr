@@ -455,8 +455,10 @@ struct PublicFleetFile {
 struct PublicFleetService {
     name: String,
     kind: &'static str,
+    client_identifier: String,
     base_url: String,
     token_env: String,
+    relay_only: bool,
 }
 fn write_discovery_outputs(
     fleet_file: &Path,
@@ -470,8 +472,10 @@ fn write_discovery_outputs(
             .map(|item| PublicFleetService {
                 name: item.name.clone(),
                 kind: "plex",
+                client_identifier: item.client_identifier.clone(),
                 base_url: item.base_url.clone(),
                 token_env: item.token_env.clone(),
+                relay_only: item.relay_only,
             })
             .collect(),
     })?;
@@ -488,32 +492,16 @@ fn atomic_write(path: &Path, contents: &[u8], secret: bool) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("output path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("yarr"),
-        std::process::id()
-    ));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        if secret {
-            options.mode(0o600);
-        }
-    }
-    let mut file = options.open(&temp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(temp, path)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     if secret {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        file.as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    file.as_file_mut().write_all(contents)?;
+    file.as_file_mut().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 fn read_existing_report(path: &Path) -> Result<PlexDiscoveryReport> {
@@ -545,14 +533,19 @@ fn read_existing_report(path: &Path) -> Result<PlexDiscoveryReport> {
         if !seen.insert(name.clone()) {
             bail!("duplicate Plex fleet service {name}");
         }
+        let relay_only = map
+            .get(serde_yaml_ng::Value::String("relay_only".into()))
+            .and_then(serde_yaml_ng::Value::as_bool)
+            .ok_or_else(|| anyhow!("Plex fleet service missing relay_only boolean"))?;
         resources.push(DiscoveredPlex {
-            client_identifier: get("client_identifier").unwrap_or_else(|| name.clone()),
+            client_identifier: get("client_identifier")
+                .ok_or_else(|| anyhow!("Plex fleet service missing client_identifier"))?,
             base_url: get("base_url")
                 .ok_or_else(|| anyhow!("Plex fleet service missing base_url"))?,
             token_env: get("token_env")
                 .ok_or_else(|| anyhow!("Plex fleet service missing token_env"))?,
             name,
-            relay_only: false,
+            relay_only,
             access_token: String::new(),
         });
     }
