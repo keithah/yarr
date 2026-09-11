@@ -82,11 +82,13 @@ async fn save_list_run_delete_roundtrip() {
         service.snippet_delete("greet").await.unwrap()["deleted"],
         true
     );
+    let remaining = service.snippet_list().await.unwrap();
     assert!(
-        service.snippet_list().await.unwrap()["snippets"]
+        remaining["snippets"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|snippet| snippet["name"].as_str().unwrap().starts_with("fleet_"))
     );
 }
 
@@ -105,6 +107,49 @@ async fn codemode_run_invokes_saved_snippet() {
         .await
         .unwrap();
     assert_eq!(out["result"], 42);
+}
+
+#[tokio::test]
+async fn built_in_fleet_snippets_list_run_and_cannot_be_overwritten_or_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let service = loopback_state()
+        .service
+        .with_data_dir(tmp.path().to_path_buf());
+
+    let listed = service.snippet_list().await.unwrap();
+    let names = listed["snippets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|snippet| snippet["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "fleet_activity",
+            "fleet_health",
+            "fleet_library_sizes",
+            "fleet_transcode_load"
+        ]
+    );
+    let result = service
+        .snippet_run("fleet_health", &serde_json::Value::Null)
+        .await
+        .unwrap();
+    assert!(result["result"].is_array(), "{result}");
+
+    let error = service
+        .snippet_save("fleet_health", "async () => null", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("protected snippet"), "{error}");
+    let error = service
+        .snippet_delete("fleet_health")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("protected snippet"), "{error}");
 }
 
 #[tokio::test]
