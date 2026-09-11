@@ -63,3 +63,34 @@ fn validator_covers_the_entire_generated_write_registry() {
     validate_generated_write_classification()
         .expect("every generated POST, PUT, and PATCH must have one audited row");
 }
+
+#[test]
+fn generated_write_audit_has_the_expected_complete_aggregate() {
+    let expected = [
+        (ServiceKind::Jellyfin, 130),
+        (ServiceKind::Overseerr, 62),
+        (ServiceKind::Plex, 90),
+        (ServiceKind::Prowlarr, 46),
+        (ServiceKind::Radarr, 82),
+        (ServiceKind::Sonarr, 82),
+    ];
+
+    for (kind, expected_count) in expected {
+        let actual_count = operations_for_kind(kind)
+            .iter()
+            .filter(|spec| {
+                matches!(
+                    spec.method,
+                    HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+                )
+            })
+            .filter(|spec| classify_operation(kind, spec).is_ok())
+            .count();
+        assert_eq!(
+            actual_count,
+            expected_count,
+            "{} audited writes",
+            kind.as_str()
+        );
+    }
+}
