@@ -121,12 +121,22 @@ pub(crate) fn parse_private_invocation(params_json: &str) -> Result<FleetInvocat
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FleetResultSummary {
+    #[serde(rename = "type")]
+    pub value_type: &'static str,
+    pub item_count: usize,
+    pub observed_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FleetResult {
     pub service: String,
     pub kind: ServiceKind,
     pub ok: bool,
     pub elapsed_ms: u128,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<FleetResultSummary>,
     pub value: Value,
     pub error: Option<String>,
 }

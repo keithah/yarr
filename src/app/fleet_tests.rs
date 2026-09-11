@@ -192,18 +192,34 @@ async fn dispatcher_is_bounded_concurrent_and_returns_plan_order_after_inverted_
 }
 
 #[test]
-fn oversized_value_has_only_the_precise_truncation_summary() {
-    let original = json!(["x".repeat(super::FLEET_VALUE_LIMIT_BYTES + 1)]);
+fn oversized_fleet_result_serializes_a_top_level_truncation_envelope() {
+    let original =
+        json!(["credential-that-must-not-appear".repeat(super::FLEET_VALUE_LIMIT_BYTES + 1,)]);
     let observed_bytes = serde_json::to_vec(&original).unwrap().len();
-    let (value, truncated) = super::truncate_fleet_value(original);
-    assert!(truncated);
-    assert_eq!(
-        value,
-        json!({"summary":{"type":"array","item_count":1,"observed_bytes":observed_bytes},"value":null})
+    let result = super::fleet_result(
+        PlannedFleetLeaf {
+            service: "alpha".to_owned(),
+            kind: ServiceKind::Sonarr,
+            action: YarrAction::ServiceStatus {
+                service: "alpha".to_owned(),
+            },
+        },
+        std::time::Duration::ZERO,
+        Ok(Ok(original)),
     );
-    let (small, truncated) = super::truncate_fleet_value(json!({"ok": true}));
-    assert!(!truncated);
-    assert_eq!(small, json!({"ok": true}));
+
+    let serialized = serde_json::to_value(result).unwrap();
+    assert_eq!(serialized["truncated"], true);
+    assert_eq!(
+        serialized["summary"],
+        json!({"type":"array","item_count":1,"observed_bytes":observed_bytes})
+    );
+    assert_eq!(serialized["value"], serde_json::Value::Null);
+    assert!(
+        !serialized
+            .to_string()
+            .contains("credential-that-must-not-appear")
+    );
 }
 
 #[tokio::test]
@@ -320,8 +336,15 @@ async fn leaf_failures_and_timeouts_have_distinct_envelopes() {
     assert_eq!(timed_out.value, serde_json::Value::Null);
     assert!(!failed.truncated);
     assert!(!timed_out.truncated);
-    assert_eq!(failed.error.as_deref(), Some("upstream broke"));
-    assert_eq!(timed_out.error.as_deref(), Some("fleet instance timed out"));
+    let failed_serialized = serde_json::to_value(failed).unwrap();
+    let timed_out_serialized = serde_json::to_value(timed_out).unwrap();
+    for serialized in [&failed_serialized, &timed_out_serialized] {
+        assert!(serialized.get("summary").is_none());
+        assert_eq!(serialized["truncated"], false);
+        assert_eq!(serialized["value"], serde_json::Value::Null);
+    }
+    assert_eq!(failed_serialized["error"], "upstream broke");
+    assert_eq!(timed_out_serialized["error"], "fleet instance timed out");
 }
 
 #[tokio::test]

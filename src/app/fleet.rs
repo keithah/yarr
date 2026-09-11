@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use futures_util::{StreamExt, stream};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{
     actions::{dispatch::validate_action_for_service, execute_service_action},
     app::codemode::CodeModeCallGuard,
     fleet::{
-        FleetInvocation, FleetResult, FleetSelector, PlannedFleetInvocation, PlannedFleetLeaf,
+        FleetInvocation, FleetResult, FleetResultSummary, FleetSelector, PlannedFleetInvocation,
+        PlannedFleetLeaf,
     },
 };
 
@@ -136,13 +137,14 @@ fn fleet_result(
 ) -> FleetResult {
     match outcome {
         Ok(Ok(value)) => {
-            let (value, truncated) = truncate_fleet_value(value);
+            let (value, summary) = truncate_fleet_value(value);
             FleetResult {
                 service: leaf.service,
                 kind: leaf.kind,
                 ok: true,
                 elapsed_ms: elapsed.as_millis(),
-                truncated,
+                truncated: summary.is_some(),
+                summary,
                 value,
                 error: None,
             }
@@ -153,6 +155,7 @@ fn fleet_result(
             ok: false,
             elapsed_ms: elapsed.as_millis(),
             truncated: false,
+            summary: None,
             value: Value::Null,
             error: Some(error.to_string()),
         },
@@ -162,16 +165,17 @@ fn fleet_result(
             ok: false,
             elapsed_ms: elapsed.as_millis(),
             truncated: false,
+            summary: None,
             value: Value::Null,
             error: Some("fleet instance timed out".to_owned()),
         },
     }
 }
 
-fn truncate_fleet_value(value: Value) -> (Value, bool) {
+fn truncate_fleet_value(value: Value) -> (Value, Option<FleetResultSummary>) {
     let observed_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
     if observed_bytes <= FLEET_VALUE_LIMIT_BYTES {
-        return (value, false);
+        return (value, None);
     }
     let item_count = match &value {
         Value::Array(items) => items.len(),
@@ -188,7 +192,11 @@ fn truncate_fleet_value(value: Value) -> (Value, bool) {
         Value::Null => "null",
     };
     (
-        json!({"summary": {"type": value_type, "item_count": item_count, "observed_bytes": observed_bytes}, "value": null}),
-        true,
+        Value::Null,
+        Some(FleetResultSummary {
+            value_type,
+            item_count,
+            observed_bytes,
+        }),
     )
 }
