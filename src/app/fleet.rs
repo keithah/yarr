@@ -16,6 +16,10 @@ use crate::{
 
 use super::YarrService;
 
+#[cfg(test)]
+#[path = "fleet_tests.rs"]
+mod tests;
+
 const FLEET_MAX_CONCURRENT: usize = 4;
 const FLEET_INSTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const FLEET_VALUE_LIMIT_BYTES: usize = 8 * 1024;
