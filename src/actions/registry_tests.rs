@@ -30,6 +30,39 @@ fn curated_commands_explicitly_report_no_yarr_local_filesystem_effect() {
 }
 
 #[test]
+fn local_file_effect_requires_write_scope_and_mutation_metadata() {
+    fn noop<'a>(
+        _service: &'a crate::app::YarrService,
+        _args: &'a serde_json::Value,
+    ) -> CommandFuture<'a> {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+
+    let mismatched = CommandDescriptor {
+        name: "test_local_writer",
+        capability: Capability::ArrManager,
+        description: "test-only descriptor",
+        required_scope: READ_SCOPE,
+        required_params: &[],
+        optional_params: &[],
+        destructive: false,
+        mutates: false,
+        local_effect: LocalEffect::WritesFile,
+        typed_params: &[],
+        handler: noop,
+    };
+    assert_eq!(
+        mismatched
+            .local_effect
+            .requires_write()
+            .then_some(WRITE_SCOPE),
+        Some(required_scope_for_descriptor(&mismatched))
+    );
+    let error = validate_curated_command_metadata(&mismatched).unwrap_err();
+    assert!(error.to_string().contains("must declare mutates=true"));
+}
+
+#[test]
 fn action_metadata_matches_yarr_surface() {
     assert_eq!(
         action_names(),
