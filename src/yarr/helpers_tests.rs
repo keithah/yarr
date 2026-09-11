@@ -196,6 +196,17 @@ fn body_preview_redacts_x_api_key_json() {
 }
 
 #[test]
+fn body_preview_redacts_plex_token_aliases_in_json_and_query_shapes() {
+    let preview = body_preview(
+        r#"{"AccessToken":"json-access","AUTH_TOKEN":"json-auth"} accessToken=query-access&auth-token=query-auth"#,
+    );
+    for secret in ["json-access", "json-auth", "query-access", "query-auth"] {
+        assert!(!preview.contains(secret), "secret leaked: {preview}");
+    }
+    assert_eq!(preview.matches("[redacted]").count(), 4, "got: {preview}");
+}
+
+#[test]
 fn body_preview_leaves_non_secret_json_untouched() {
     let preview = body_preview(r#"{"title":"My Movie","year":2020}"#);
     assert!(preview.contains("My Movie"), "got: {preview}");

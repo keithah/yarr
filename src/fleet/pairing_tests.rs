@@ -54,6 +54,56 @@ fn duplicate_identifier_is_ambiguous_and_not_paired() {
 }
 
 #[tokio::test]
+async fn configured_plex_pairing_error_redacts_plex_credentials_from_http_body() {
+    const ACCESS_TOKEN: &str = "PAIRING_ERROR_ACCESS_TOKEN_SECRET";
+    const AUTH_TOKEN: &str = "PAIRING_ERROR_AUTH_TOKEN_SECRET";
+    let app = axum::Router::new().route(
+        "/plex/identity",
+        axum::routing::get(|| async {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "application/json")],
+                format!(r#"{{"accessToken":"{ACCESS_TOKEN}","authToken":"{AUTH_TOKEN}","message":"Plex identity failed"}}"#),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "plex-main".into(),
+            kind: ServiceKind::Plex,
+            base_url: format!("http://{address}/plex"),
+            ..Default::default()
+        }],
+    };
+    let client = YarrClient::new(&config).unwrap();
+
+    let error = pair_configured_tautulli_to_plex(&client, &config.services)
+        .await
+        .expect_err("configured Plex HTTP errors must reach the pairing caller");
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains(ACCESS_TOKEN),
+        "access token leaked: {rendered}"
+    );
+    assert!(
+        !rendered.contains(AUTH_TOKEN),
+        "auth token leaked: {rendered}"
+    );
+    assert!(
+        rendered.contains("Plex identity failed"),
+        "lost diagnosis: {rendered}"
+    );
+    assert!(
+        rendered.contains("[redacted]"),
+        "missing redaction: {rendered}"
+    );
+}
+
+#[tokio::test]
 async fn pairs_identifiers_read_from_configured_tautulli_and_plex_services() {
     let app = axum::Router::new()
         .route(

@@ -274,6 +274,22 @@ pub fn slim(value: Value, keep_fields: &[&str]) -> Value {
     }
 }
 
+const SECRET_KEYS: &[&str] = &[
+    "apikey",
+    "api_key",
+    "x-api-key",
+    "access_token",
+    "access-token",
+    "accesstoken",
+    "auth_token",
+    "auth-token",
+    "authtoken",
+    "token",
+    "x-plex-token",
+    "x-emby-token",
+    "password",
+];
+
 /// Truncated, secret-redacted preview of a response body for error messages.
 ///
 /// Redacts two secret shapes (LOW-1): query-string `key=value` pairs and
@@ -286,21 +302,14 @@ pub fn body_preview(text: &str) -> String {
         .filter(|ch| !ch.is_control() || ch.is_whitespace())
         .take(160)
         .collect();
-    // Keep this set aligned with `SECRET_KEYS` in `redact_json_secrets` so a
-    // form-encoded / query-string secret (e.g. qBittorrent's `password=` login
-    // form) is redacted on this pass too, not just the JSON pass.
-    for needle in [
-        "apikey=",
-        "api_key=",
-        "x-api-key=",
-        "token=",
-        "x-plex-token=",
-        "x-emby-token=",
-        "password=",
-    ] {
-        // `needle` is already a lowercase literal — only the (mutating) preview
-        // needs case-folding, and only because `replace_range` shifts offsets.
-        while let Some(index) = preview.to_ascii_lowercase().find(needle) {
+    // Query-style redaction shares `SECRET_KEYS` with JSON-member redaction.
+    // A key-specific pass runs before the generic `token=` suffix so output
+    // preserves only `[redacted]`, never a partially retained credential name.
+    for key in SECRET_KEYS {
+        let needle = format!("{key}=");
+        // `key` is lowercase; only the mutating preview needs case-folding
+        // because `replace_range` shifts offsets.
+        while let Some(index) = preview.to_ascii_lowercase().find(&needle) {
             let end = preview[index..]
                 .find(['&', ' ', '\n', '\r'])
                 .map(|offset| index + offset)
@@ -320,15 +329,6 @@ pub fn body_preview(text: &str) -> String {
 /// on both the key and any surrounding whitespace between the colon and value.
 /// The value (including its surrounding quotes) is replaced with `[redacted]`.
 fn redact_json_secrets(preview: &mut String) {
-    const SECRET_KEYS: &[&str] = &[
-        "apikey",
-        "api_key",
-        "x-api-key",
-        "x-plex-token",
-        "x-emby-token",
-        "token",
-        "password",
-    ];
     let lower = preview.to_ascii_lowercase();
     // Collect (value_start, value_end) byte ranges to replace, then apply from
     // the end so earlier offsets stay valid.
