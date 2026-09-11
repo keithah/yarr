@@ -54,7 +54,7 @@ fn duplicate_identifier_is_ambiguous_and_not_paired() {
 }
 
 #[tokio::test]
-async fn configured_plex_pairing_error_redacts_plex_credentials_from_http_body() {
+async fn configured_plex_pairing_http_error_redacts_whitespace_before_delimiter_credential() {
     const ACCESS_TOKEN: &str = "PAIRING_ERROR_ACCESS_TOKEN_SECRET";
     const AUTH_TOKEN: &str = "PAIRING_ERROR_AUTH_TOKEN_SECRET";
     const PLAINTEXT_COLON_TOKEN: &str = "PAIRING_PLAINTEXT_COLON_UNIQUE_SECRET";
@@ -66,7 +66,7 @@ async fn configured_plex_pairing_error_redacts_plex_credentials_from_http_body()
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 [("content-type", "text/plain")],
                 format!(
-                    "Plex identity failed: accessToken: {PLAINTEXT_COLON_TOKEN}, authToken {PLAINTEXT_SPACE_TOKEN}; json accessToken={ACCESS_TOKEN}&authToken={AUTH_TOKEN}"
+                    "Plex identity failed: accessToken : {PLAINTEXT_COLON_TOKEN}, authToken {PLAINTEXT_SPACE_TOKEN}; json accessToken={ACCESS_TOKEN}&authToken={AUTH_TOKEN}"
                 ),
             )
         }),
@@ -100,6 +100,10 @@ async fn configured_plex_pairing_error_redacts_plex_credentials_from_http_body()
     assert!(
         rendered.contains("Plex identity failed"),
         "lost diagnosis: {rendered}"
+    );
+    assert!(
+        rendered.contains("plex-main returned HTTP 500"),
+        "configured Plex HTTP error did not reach pairing: {rendered}"
     );
     assert!(
         rendered.contains("[redacted]"),

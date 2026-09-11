@@ -336,15 +336,14 @@ fn redact_plaintext_secrets(preview: &mut String) {
             while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
                 value_start += 1;
             }
-            if value_start == after_key {
-                if !matches!(bytes.get(value_start), Some(b'=' | b':')) {
-                    from = after_key;
-                    continue;
-                }
+            if matches!(bytes.get(value_start), Some(b'=' | b':')) {
                 value_start += 1;
                 while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
                     value_start += 1;
                 }
+            } else if value_start == after_key {
+                from = after_key;
+                continue;
             }
             if value_start == bytes.len() || is_secret_value_delimiter(bytes[value_start]) {
                 from = after_key;

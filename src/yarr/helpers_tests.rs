@@ -226,6 +226,22 @@ fn body_preview_redacts_plaintext_plex_token_aliases_without_overredacting() {
 }
 
 #[test]
+fn body_preview_redacts_plaintext_aliases_with_whitespace_before_delimiters() {
+    // A whitespace gap before `=` or `:` must not turn the alias into a
+    // whitespace-separated form and leave the following credential visible.
+    let preview = body_preview(
+        "errors: ACCESS_TOKEN = LEAK_EQ; AUTH-TOKEN : LEAK_COLON, apiKey\t=\tLEAK_TAB",
+    );
+    for secret in ["LEAK_EQ", "LEAK_COLON", "LEAK_TAB"] {
+        assert!(!preview.contains(secret), "secret leaked: {preview}");
+    }
+    assert_eq!(
+        preview, "errors: [redacted]; [redacted], [redacted]",
+        "must retain only surrounding text and delimiters: {preview}"
+    );
+}
+
+#[test]
 fn body_preview_leaves_non_secret_json_untouched() {
     let preview = body_preview(r#"{"title":"My Movie","year":2020}"#);
     assert!(preview.contains("My Movie"), "got: {preview}");
