@@ -70,9 +70,10 @@ async fn pairs_identifiers_read_from_configured_tautulli_and_plex_services() {
         .route(
             "/plex/identity",
             axum::routing::get(|| async {
-                axum::Json(serde_json::json!({
-                    "MediaContainer": { "machineIdentifier": "server-identifier" }
-                }))
+                (
+                    [("content-type", "application/xml")],
+                    r#"<?xml version="1.0" encoding="UTF-8"?><MediaContainer machineIdentifier="server-identifier" size="0"/>"#,
+                )
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

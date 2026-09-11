@@ -1,5 +1,6 @@
 use super::*;
-use std::fs;
+use crate::{Config, testing::TestEnv};
+use std::{fs, io::Write};
 
 const FIXTURE: &str = include_str!("fixtures/plex_resources_redacted.json");
 
@@ -108,7 +109,7 @@ fn public_and_secret_outputs_are_separate_and_secret_is_owner_only() {
     assert!(public.contains("token_env:"));
     assert!(!public.contains("<redacted>"));
     assert!(!public.contains("accessToken"));
-    assert!(private.contains("=<redacted>"));
+    assert!(private.contains("=\"<redacted>\""));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -197,6 +198,63 @@ fn secret_output_replaces_a_permissive_destination_with_owner_only_mode() {
             0o600
         );
     }
+}
+
+#[test]
+fn secret_output_rejects_injection_before_writes_and_preserves_quoted_tokens() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet = temp.path().join("fleet.yaml");
+    let secret = temp.path().join(".env");
+    fs::write(&fleet, "sentinel-public").unwrap();
+    fs::write(&secret, "sentinel-secret").unwrap();
+    let malicious = "valid-token\nYARR_INJECTED=unexpected";
+    let report = PlexDiscoveryReport {
+        resources: vec![DiscoveredPlex {
+            name: "plex_one".into(),
+            client_identifier: "id".into(),
+            base_url: "https://server.invalid".into(),
+            token_env: "YARR_PLEX_ONE_TOKEN".into(),
+            relay_only: false,
+            access_token: malicious.into(),
+        }],
+        drift: Vec::new(),
+    };
+
+    let error = write_discovery_outputs(&fleet, &secret, &report)
+        .expect_err("newline token must be rejected before either output changes");
+    assert!(!error.to_string().contains(malicious));
+    assert_eq!(fs::read_to_string(&fleet).unwrap(), "sentinel-public");
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "sentinel-secret");
+
+    let special = " leading # \"quoted\" \\ trailing ";
+    let mut valid = report;
+    valid.resources[0].access_token = special.into();
+    write_discovery_outputs(&fleet, &secret, &valid).unwrap();
+    assert_eq!(
+        fs::read_to_string(&secret).unwrap(),
+        "YARR_PLEX_ONE_TOKEN=\" leading # \\\"quoted\\\" \\\\ trailing \"\n"
+    );
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&secret)
+        .unwrap()
+        .write_all(
+            b"YARR_SERVICES=plex_one\nYARR_PLEX_ONE_URL=https://plex.invalid\nYARR_PLEX_ONE_KIND=plex\n",
+        )
+        .unwrap();
+    let mut env = TestEnv::new();
+    env.set("YARR_HOME", temp.path());
+    for key in [
+        "YARR_SERVICES",
+        "YARR_PLEX_ONE_URL",
+        "YARR_PLEX_ONE_KIND",
+        "YARR_PLEX_ONE_TOKEN",
+    ] {
+        env.remove(key);
+    }
+    let config = Config::load().expect("documented dotenv overlay parses quoted token");
+    assert_eq!(config.yarr.services[0].token.as_deref(), Some(special));
 }
 
 #[test]

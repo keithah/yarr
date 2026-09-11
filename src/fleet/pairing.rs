@@ -120,12 +120,7 @@ pub async fn pair_configured_tautulli_to_plex(
             }
             ServiceKind::Plex => {
                 let response = client.get_json(service, "/identity").await?;
-                let client_identifier = required_string(
-                    &response,
-                    "/MediaContainer/machineIdentifier",
-                    &service.name,
-                    "Plex machineIdentifier",
-                )?;
+                let client_identifier = plex_machine_identifier(&response, &service.name)?;
                 plex.push(PlexIdentity {
                     service: service.name.clone(),
                     client_identifier,
@@ -136,6 +131,28 @@ pub async fn pair_configured_tautulli_to_plex(
     }
 
     Ok(pair_tautulli_to_plex(&tautulli, &plex))
+}
+
+fn plex_machine_identifier(response: &serde_json::Value, service: &str) -> Result<String> {
+    if let Some(identifier) = response
+        .pointer("/MediaContainer/machineIdentifier")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(identifier.to_owned());
+    }
+
+    response
+        .as_str()
+        .and_then(|xml| roxmltree::Document::parse(xml).ok())
+        .and_then(|document| {
+            document
+                .root_element()
+                .attribute("machineIdentifier")
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| anyhow!("{service} response is missing Plex machineIdentifier"))
 }
 
 fn required_string(

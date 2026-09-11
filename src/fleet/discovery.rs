@@ -482,11 +482,34 @@ fn write_discovery_outputs(
     let secret = report
         .resources
         .iter()
-        .map(|item| format!("{}={}\n", item.token_env, item.access_token))
-        .collect::<String>();
+        .map(|item| dotenv_assignment(&item.token_env, &item.access_token))
+        .collect::<Result<Vec<_>>>()?
+        .join("\n")
+        + "\n";
     atomic_write(fleet_file, public.as_bytes(), false)?;
     atomic_write(secret_file, secret.as_bytes(), true)
 }
+
+fn dotenv_assignment(key: &str, value: &str) -> Result<String> {
+    Ok(format!("{key}={}", dotenv_value(value)?))
+}
+
+fn dotenv_value(value: &str) -> Result<String> {
+    if value.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        bail!("dotenv values cannot contain newlines or NUL bytes");
+    }
+    if value.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | '=' | ',')
+    }) {
+        return Ok(value.to_owned());
+    }
+    Ok(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
 fn atomic_write(path: &Path, contents: &[u8], secret: bool) -> Result<()> {
     let parent = path
         .parent()

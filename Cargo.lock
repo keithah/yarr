@@ -4269,6 +4269,7 @@ dependencies = [
  "labby-auth",
  "reqwest",
  "rmcp",
+ "roxmltree",
  "rquickjs",
  "schemars",
  "serde",
