@@ -415,17 +415,17 @@ fn redact_json_secrets(preview: &mut String) {
             let key_at = from + rel;
             let after_key = key_at + key_pat.len();
             from = after_key;
-            // Expect optional whitespace, a colon, optional whitespace, then `"`.
+            // Expect optional JSON whitespace, a colon, optional JSON whitespace, then `"`.
             let bytes = lower.as_bytes();
             let mut i = after_key;
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            while i < bytes.len() && is_json_ascii_whitespace(bytes[i]) {
                 i += 1;
             }
             if i >= bytes.len() || bytes[i] != b':' {
                 continue;
             }
             i += 1;
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            while i < bytes.len() && is_json_ascii_whitespace(bytes[i]) {
                 i += 1;
             }
             if i >= bytes.len() || bytes[i] != b'"' {
@@ -470,6 +470,10 @@ fn redact_json_secrets(preview: &mut String) {
             preview.replace_range(start..end, "[redacted]");
         }
     }
+}
+
+fn is_json_ascii_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 /// Reject traversal, absolute URLs, encoded separators, and inline secrets.

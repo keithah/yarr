@@ -163,6 +163,52 @@ async fn configured_plex_pairing_http_error_redacts_newline_separated_json_crede
 }
 
 #[tokio::test]
+async fn configured_plex_pairing_http_error_redacts_truncated_multiline_json_credential() {
+    const TRUNCATED_MULTILINE_ACCESS_TOKEN: &str =
+        "PAIRING_TRUNCATED_MULTILINE_JSON_ACCESS_TOKEN_SECRET";
+    let app = axum::Router::new().route(
+        "/plex/identity",
+        axum::routing::get(|| async {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "application/json")],
+                format!("{{\n\"accessToken\"\n:\n\"{TRUNCATED_MULTILINE_ACCESS_TOKEN}"),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "plex-main".into(),
+            kind: ServiceKind::Plex,
+            base_url: format!("http://{address}/plex"),
+            ..Default::default()
+        }],
+    };
+    let client = YarrClient::new(&config).unwrap();
+
+    let error = pair_configured_tautulli_to_plex(&client, &config.services)
+        .await
+        .expect_err("configured Plex HTTP errors must reach the pairing caller");
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains(TRUNCATED_MULTILINE_ACCESS_TOKEN),
+        "truncated multiline JSON credential leaked: {rendered}"
+    );
+    assert!(
+        rendered.contains("plex-main returned HTTP 500"),
+        "configured Plex HTTP error did not reach pairing: {rendered}"
+    );
+    assert!(
+        rendered.contains("[redacted]"),
+        "missing redaction: {rendered}"
+    );
+}
+
+#[tokio::test]
 async fn configured_plex_pairing_http_error_redacts_json_escaped_quote_credential() {
     const ESCAPED_QUOTE_SUFFIX: &str = "PAIRING_JSON_ESCAPED_SUFFIX_SECRET";
     let app = axum::Router::new().route(
