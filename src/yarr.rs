@@ -29,7 +29,7 @@ mod openapi_transport;
 #[path = "yarr/response.rs"]
 mod response;
 
-pub use helpers::{build_url, query_get, slim, validate_safe_path};
+pub use helpers::{RequestDeadline, build_url, query_get, slim, validate_safe_path};
 pub(crate) use openapi_transport::{EncodedRequestBody, MultipartField, OpenApiRequest};
 #[cfg(test)]
 use response::allows_text_response;
@@ -165,6 +165,15 @@ impl YarrClient {
             .await
     }
 
+    pub async fn get_json_until(
+        &self,
+        service: &ServiceConfig,
+        path: &str,
+        deadline: RequestDeadline,
+    ) -> Result<Value> {
+        deadline.until(self.get_json(service, path)).await
+    }
+
     pub async fn post_json(
         &self,
         service: &ServiceConfig,
@@ -173,6 +182,16 @@ impl YarrClient {
     ) -> Result<Value> {
         self.request_json(Method::POST, service, path, Some(body), None)
             .await
+    }
+
+    pub async fn post_json_until(
+        &self,
+        service: &ServiceConfig,
+        path: &str,
+        body: Value,
+        deadline: RequestDeadline,
+    ) -> Result<Value> {
+        deadline.until(self.post_json(service, path, body)).await
     }
 
     pub async fn put_json(
@@ -185,6 +204,16 @@ impl YarrClient {
             .await
     }
 
+    pub async fn put_json_until(
+        &self,
+        service: &ServiceConfig,
+        path: &str,
+        body: Value,
+        deadline: RequestDeadline,
+    ) -> Result<Value> {
+        deadline.until(self.put_json(service, path, body)).await
+    }
+
     pub async fn delete_json(
         &self,
         service: &ServiceConfig,
@@ -193,6 +222,16 @@ impl YarrClient {
     ) -> Result<Value> {
         self.request_json(Method::DELETE, service, path, body, None)
             .await
+    }
+
+    pub async fn delete_json_until(
+        &self,
+        service: &ServiceConfig,
+        path: &str,
+        body: Option<Value>,
+        deadline: RequestDeadline,
+    ) -> Result<Value> {
+        deadline.until(self.delete_json(service, path, body)).await
     }
 
     /// Core request path. `accept_mime` lets callers (e.g. Plex) negotiate a

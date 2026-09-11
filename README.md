@@ -395,6 +395,12 @@ login. Plex and Jellyfin token headers are handled separately.
 `YARR_MCP_TOOL_MODE=flat` only when a gateway should see separate per-service
 tools.
 
+Code Mode has one 120-second absolute deadline shared by JavaScript execution,
+native action dispatch, and Code Mode-originated HTTP work. QuickJS applies the
+configured heap and stack limits inside its runtime, but because yarr embeds it
+in-process those limits are not process-level memory isolation. Use a
+process-isolated execution path when that stronger guarantee is required.
+
 ## Authentication
 
 `YARR_MCP_TOKEN` authenticates `/mcp` on any HTTP bind, including loopback.
