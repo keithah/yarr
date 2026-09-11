@@ -112,6 +112,58 @@ async fn configured_plex_pairing_http_error_redacts_whitespace_before_delimiter_
 }
 
 #[tokio::test]
+async fn configured_plex_pairing_http_error_redacts_quoted_plaintext_credentials() {
+    const QUOTED_COLON_SECRET: &str = "P_Q_COLON";
+    const QUOTED_EQUALS_SECRET: &str = "P_Q_EQUALS";
+    const ESCAPED_QUOTE_SECRET: &str = "P_Q_ESCAPED";
+    const TRUNCATED_QUOTED_SECRET: &str = "P_Q_UNCLOSED";
+    let app = axum::Router::new().route(
+        "/plex/identity",
+        axum::routing::get(|| async {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "text/plain")],
+                format!(
+                    r#"Plex failure: accessToken: "{QUOTED_COLON_SECRET}"; auth-token = "{QUOTED_EQUALS_SECRET}"; token: "prefix\"{ESCAPED_QUOTE_SECRET}"; auth-token = "{TRUNCATED_QUOTED_SECRET}"#
+                ),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = YarrConfig {
+        services: vec![ServiceConfig {
+            name: "plex-main".into(),
+            kind: ServiceKind::Plex,
+            base_url: format!("http://{address}/plex"),
+            ..Default::default()
+        }],
+    };
+    let client = YarrClient::new(&config).unwrap();
+
+    let error = pair_configured_tautulli_to_plex(&client, &config.services)
+        .await
+        .expect_err("configured Plex HTTP errors must reach the pairing caller");
+    let rendered = error.to_string();
+    for secret in [
+        QUOTED_COLON_SECRET,
+        QUOTED_EQUALS_SECRET,
+        ESCAPED_QUOTE_SECRET,
+        TRUNCATED_QUOTED_SECRET,
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "quoted plaintext credential leaked"
+        );
+    }
+    assert!(rendered.contains("Plex failure:"));
+    assert!(rendered.contains("plex-main returned HTTP 500"));
+    assert_eq!(rendered.matches("[redacted]").count(), 4);
+}
+
+#[tokio::test]
 async fn configured_plex_pairing_http_error_redacts_newline_separated_json_credential() {
     const NEWLINE_ACCESS_TOKEN: &str = "PAIRING_JSON_NEWLINE_ACCESS_TOKEN_SECRET";
     let app = axum::Router::new().route(

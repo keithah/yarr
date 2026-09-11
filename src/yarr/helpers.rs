@@ -339,7 +339,9 @@ fn redact_json_value_secrets(value: &mut Value) {
     }
 }
 
-/// Redact unquoted `key=value`, `key: value`, and `key value` credentials.
+/// Redact `key=value`, `key: value`, and `key value` credentials, including
+/// quoted plaintext values. A quoted value ends at the first unescaped quote;
+/// an unclosed quote is redacted through the bounded preview's end.
 ///
 /// A credential alias must begin at a text-token boundary, so a word such as
 /// `notaccessToken` and URL path text are not mistaken for credentials. Values
@@ -374,15 +376,25 @@ fn redact_plaintext_secrets(preview: &mut String) {
                 from = after_key;
                 continue;
             }
-            if value_start == bytes.len() || is_secret_value_delimiter(bytes[value_start]) {
+            if value_start == bytes.len() {
                 from = after_key;
                 continue;
             }
-            let value_end = bytes[value_start..]
-                .iter()
-                .position(|byte| is_secret_value_delimiter(*byte))
-                .map(|offset| value_start + offset)
-                .unwrap_or(bytes.len());
+            let value_end = if bytes[value_start] == b'"' {
+                json_string_end(bytes, value_start)
+                    .map(|end| end + 1)
+                    .unwrap_or(bytes.len())
+            } else {
+                if is_secret_value_delimiter(bytes[value_start]) {
+                    from = after_key;
+                    continue;
+                }
+                bytes[value_start..]
+                    .iter()
+                    .position(|byte| is_secret_value_delimiter(*byte))
+                    .map(|offset| value_start + offset)
+                    .unwrap_or(bytes.len())
+            };
             preview.replace_range(key_at..value_end, "[redacted]");
             from = key_at + "[redacted]".len();
         }

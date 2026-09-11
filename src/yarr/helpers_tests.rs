@@ -324,6 +324,58 @@ fn body_preview_redacts_plaintext_plex_token_aliases_without_overredacting() {
 }
 
 #[test]
+fn body_preview_redacts_quoted_plaintext_aliases_without_losing_diagnostics() {
+    const QUOTED_COLON_SECRET: &str = "UNIT_QUOTED_PLAINTEXT_COLON_SECRET";
+    const QUOTED_EQUALS_SECRET: &str = "UNIT_QUOTED_PLAINTEXT_EQUALS_SECRET";
+    let preview = body_preview(&format!(
+        "Plex failure: accessToken: \"{QUOTED_COLON_SECRET}\"; auth-token = \"{QUOTED_EQUALS_SECRET}\"; status=500"
+    ));
+
+    for secret in [QUOTED_COLON_SECRET, QUOTED_EQUALS_SECRET] {
+        assert!(
+            !preview.contains(secret),
+            "quoted plaintext credential leaked"
+        );
+    }
+    assert_eq!(preview.matches("[redacted]").count(), 2);
+    assert!(preview.contains("Plex failure:"));
+    assert!(preview.contains("status=500"));
+}
+
+#[test]
+fn body_preview_redacts_quoted_plaintext_values_through_escaped_quote_parity() {
+    const ESCAPED_QUOTE_SECRET: &str = "UNIT_ESCAPED_QUOTE_PLAINTEXT_SECRET";
+    const EVEN_BACKSLASH_SECRET: &str = "UNIT_EVEN_BACKSLASH_PLAINTEXT_SECRET";
+    let preview = body_preview(&format!(
+        r#"Plex failure: accessToken: "prefix\"{ESCAPED_QUOTE_SECRET}"; auth-token = "{EVEN_BACKSLASH_SECRET}\\"; status=500"#
+    ));
+
+    for secret in [ESCAPED_QUOTE_SECRET, EVEN_BACKSLASH_SECRET] {
+        assert!(
+            !preview.contains(secret),
+            "quoted plaintext credential leaked"
+        );
+    }
+    assert_eq!(preview.matches("[redacted]").count(), 2);
+    assert!(preview.contains("status=500"));
+}
+
+#[test]
+fn body_preview_redacts_truncated_quoted_plaintext_value() {
+    const TRUNCATED_QUOTED_SECRET: &str = "UNIT_TRUNCATED_QUOTED_PLAINTEXT_SECRET";
+    let preview = body_preview(&format!(
+        "Plex failure: auth-token = \"{TRUNCATED_QUOTED_SECRET}"
+    ));
+
+    assert!(
+        !preview.contains(TRUNCATED_QUOTED_SECRET),
+        "truncated quoted plaintext credential leaked"
+    );
+    assert!(preview.contains("Plex failure:"));
+    assert!(preview.contains("[redacted]"));
+}
+
+#[test]
 fn body_preview_redacts_plaintext_aliases_with_whitespace_before_delimiters() {
     // A whitespace gap before `=` or `:` must not turn the alias into a
     // whitespace-separated form and leave the following credential visible.
