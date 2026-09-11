@@ -63,6 +63,68 @@ fn local_file_effect_requires_write_scope_and_mutation_metadata() {
 }
 
 #[test]
+fn test_curated_registration_serializes_parallel_installers() {
+    fn noop<'a>(
+        _service: &'a crate::app::YarrService,
+        _args: &'a serde_json::Value,
+    ) -> CommandFuture<'a> {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+
+    fn test_command(name: &'static str) -> CommandDescriptor {
+        CommandDescriptor {
+            name,
+            capability: Capability::ArrManager,
+            description: "test-only descriptor",
+            required_scope: READ_SCOPE,
+            required_params: &[],
+            optional_params: &[],
+            destructive: false,
+            mutates: false,
+            local_effect: LocalEffect::None,
+            typed_params: &[],
+            handler: noop,
+        }
+    }
+
+    let (first_installed_tx, first_installed_rx) = std::sync::mpsc::channel();
+    let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+    let (second_finished_tx, second_finished_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let first = scope.spawn(move || {
+            let registration = install_test_curated_command(test_command("first_parallel_test"));
+            first_installed_tx.send(()).unwrap();
+            release_first_rx.recv().unwrap();
+            drop(registration);
+        });
+
+        first_installed_rx.recv().unwrap();
+        let second = scope.spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                drop(install_test_curated_command(test_command(
+                    "second_parallel_test",
+                )));
+            });
+            second_finished_tx.send(result.is_ok()).unwrap();
+        });
+
+        let second_waited_for_first_drop = second_finished_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err();
+        release_first_tx.send(()).unwrap();
+        first.join().unwrap();
+        let second_succeeded = second_finished_rx.recv().unwrap();
+        second.join().unwrap();
+        assert!(
+            second_waited_for_first_drop,
+            "the second installer must wait until the first registration drops"
+        );
+        assert!(second_succeeded);
+    });
+}
+
+#[test]
 fn action_metadata_matches_yarr_surface() {
     assert_eq!(
         action_names(),

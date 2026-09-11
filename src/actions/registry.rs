@@ -392,14 +392,24 @@ static TEST_CURATED_COMMAND: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
+static TEST_CURATED_COMMAND_INSTALLATION: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
 pub(crate) struct TestCuratedCommandRegistration {
     name: &'static str,
+    _installation_guard: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 pub(crate) fn install_test_curated_command(
     command: CommandDescriptor,
 ) -> TestCuratedCommandRegistration {
+    let installation_lock =
+        TEST_CURATED_COMMAND_INSTALLATION.get_or_init(|| std::sync::Mutex::new(()));
+    let installation_guard = installation_lock
+        .lock()
+        .expect("test curated command installation lock poisoned");
     let slot = TEST_CURATED_COMMAND.get_or_init(|| std::sync::Mutex::new(None));
     let mut slot = slot.lock().expect("test curated command lock poisoned");
     assert!(
@@ -408,7 +418,10 @@ pub(crate) fn install_test_curated_command(
     );
     let name = command.name;
     *slot = Some(Box::leak(Box::new(command)));
-    TestCuratedCommandRegistration { name }
+    TestCuratedCommandRegistration {
+        name,
+        _installation_guard: installation_guard,
+    }
 }
 
 #[cfg(test)]

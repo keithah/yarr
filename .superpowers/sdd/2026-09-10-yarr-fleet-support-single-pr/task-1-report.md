@@ -38,3 +38,30 @@ A default-parallel `cargo test` run had one failure in the pre-existing deadline
 ## Scope
 
 Modified only the curated-command metadata/dispatch boundary, MCP Code Mode authorization plumbing, their tests, and this task report. No network, live credentials, push, or PR actions were performed.
+
+## Follow-up repair — test-only registry registration concurrency
+
+### Finding repaired
+
+`install_test_curated_command` protected only the brief slot write. Its returned RAII registration did not retain exclusion, so default-parallel Rust tests could overlap two registrations: the second test panicked on the occupied global slot.
+
+### Strict TDD evidence
+
+1. Added `test_curated_registration_serializes_parallel_installers`, which installs one descriptor in a scoped thread, attempts a second concurrent installation, and requires that it remain blocked until the first registration drops.
+2. RED observed with:
+   ```text
+   RUSTC=/Users/hermes/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/rustc rustup run 1.97.1-aarch64-apple-darwin cargo test --lib test_curated_registration_serializes_parallel_installers -- --nocapture
+   ```
+   It failed with `only one test curated command may be installed` from `src/actions/registry.rs:405` (and the expected cleanup lock-poison follow-on).
+3. Added a cfg(test)-only `TEST_CURATED_COMMAND_INSTALLATION` mutex. `TestCuratedCommandRegistration` now owns its `MutexGuard` for the complete registration lifetime, while the existing slot mutex remains short-lived for lookups and cleanup.
+4. GREEN observed with the same focused test: 1 passed.
+
+### Verification
+
+- Direct `rustfmt --edition 2024 src/actions/registry.rs src/actions/registry_tests.rs` completed successfully. (`cargo fmt` is unavailable because this host's toolchain lacks the `cargo-fmt` component.)
+- `cargo test --lib` under the default Rust parallel-test configuration — 611 passed, 0 failed.
+- `git diff --check` — passed.
+
+### Scope
+
+Only `src/actions/registry.rs`, `src/actions/registry_tests.rs`, and this report changed for the follow-up. Production `LocalEffect` behavior is unchanged; no serialized-test workaround, network, credentials, push, or PR actions were used.
