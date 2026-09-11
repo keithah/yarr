@@ -84,6 +84,34 @@ impl CodeModeCallGuard for RecordingGuard {
     }
 }
 
+struct DenyingStatusGuard {
+    runtime: Arc<Mutex<Vec<String>>>,
+}
+
+impl CodeModeCallGuard for DenyingStatusGuard {
+    fn authorize<'a>(
+        &'a self,
+        action: &'a YarrAction,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let runtime = Arc::clone(&self.runtime);
+        Box::pin(async move {
+            if matches!(action, YarrAction::ServiceStatus { .. }) {
+                let service = action_service(action).to_owned();
+                runtime.lock().unwrap().push(service.clone());
+                return Err(format!("status for {service} denied"));
+            }
+            Ok(())
+        })
+    }
+
+    fn authorize_planning_action<'a>(
+        &'a self,
+        _action: &'a YarrAction,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 fn action_service(action: &YarrAction) -> &str {
     match action {
         YarrAction::ServiceStatus { service }
@@ -253,6 +281,47 @@ async fn guarded_fleet_preflight_and_runtime_authorize_every_leaf() {
         ["alpha", "bravo", "charlie", "alpha", "bravo", "charlie"]
     );
     assert_eq!(*guard.aggregate.lock().unwrap(), vec![Vec::<String>::new()]);
+}
+
+#[tokio::test]
+async fn guarded_fleet_status_denies_every_runtime_leaf_before_transport() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&requests);
+    let app = Router::new().fallback(any(move || {
+        let observed = Arc::clone(&observed);
+        async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"version":"must-not-reach-transport"}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let service = fleet_service(url, &["charlie", "alpha", "bravo"]);
+    let runtime = Arc::new(Mutex::new(vec![]));
+    let guard: Arc<dyn CodeModeCallGuard> = Arc::new(DenyingStatusGuard {
+        runtime: Arc::clone(&runtime),
+    });
+
+    let result = service
+        .codemode_with_guard(r#"async () => fleet.status()"#, Arc::clone(&guard))
+        .await
+        .unwrap();
+
+    assert!(
+        result["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|leaf| !leaf["ok"].as_bool().unwrap())
+    );
+    let mut guarded = runtime.lock().unwrap().clone();
+    guarded.sort();
+    assert_eq!(
+        guarded,
+        ["alpha", "alpha", "bravo", "bravo", "charlie", "charlie"]
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

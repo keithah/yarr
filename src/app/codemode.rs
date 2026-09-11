@@ -475,7 +475,7 @@ impl YarrService {
         }
         if id == "__yarrFleetStatus" {
             let results = self
-                .fleet_status()
+                .fleet_status_with_guard(Some(guard))
                 .await
                 .map_err(|error| error.to_string())?;
             return serde_json::to_string(&results)

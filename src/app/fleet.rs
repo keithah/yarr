@@ -78,12 +78,19 @@ impl YarrService {
     }
 
     pub async fn fleet_status(&self) -> Result<Vec<FleetResult>> {
-        self.dispatch_fleet(FleetInvocation {
+        self.fleet_status_with_guard(None).await
+    }
+
+    pub(super) async fn fleet_status_with_guard(
+        &self,
+        guard: Option<std::sync::Arc<dyn CodeModeCallGuard>>,
+    ) -> Result<Vec<FleetResult>> {
+        let plan = self.plan_fleet(FleetInvocation {
             selector: FleetSelector::All { kind: None },
             action: "service_status".to_owned(),
             params: serde_json::Map::new(),
-        })
-        .await
+        })?;
+        Ok(self.dispatch_planned_fleet(plan, guard).await)
     }
 
     pub(super) async fn dispatch_planned_fleet(
