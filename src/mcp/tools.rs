@@ -29,6 +29,7 @@ pub(super) async fn execute_tool(
             state: state.clone(),
             peer: peer.clone(),
             auth,
+            destructive_authorized: std::sync::Mutex::new(false),
         });
         return dispatch_script_with_guard(state, name, args, guard).await;
     }
@@ -106,6 +107,10 @@ struct McpCodeModeGuard {
     state: AppState,
     peer: Peer<RoleServer>,
     auth: Option<AuthContext>,
+    /// A Code Mode script has an opaque, dynamic call graph. Authorize the
+    /// complete configured fleet once before its first destructive inner call,
+    /// then retain that authorization for the rest of this script only.
+    destructive_authorized: std::sync::Mutex<bool>,
 }
 
 pub(crate) fn authorize_codemode_action_scopes(
@@ -134,8 +139,25 @@ impl CodeModeCallGuard for McpCodeModeGuard {
             }
             reject_fleet_readonly_mutation(&self.state, action)?;
 
-            let (destructive, service_name) = destructive_inner_call(&self.state, action);
+            let (destructive, _) = destructive_inner_call(&self.state, action);
             if !destructive {
+                return Ok(());
+            }
+            let targets = codemode_destructive_targets(
+                &self
+                    .state
+                    .service
+                    .configured_service_kinds()
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+                self.state.config.destructive_fanout_max,
+            )?;
+            if *self
+                .destructive_authorized
+                .lock()
+                .map_err(|_| "Code Mode destructive authorization state is unavailable")?
+            {
                 return Ok(());
             }
             if self.peer.supported_elicitation_modes().is_empty() {
@@ -144,10 +166,6 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                     action.name()
                 ));
             }
-            let targets = super::rmcp_server::destructive_targets(
-                &[service_name.to_owned()],
-                self.state.config.destructive_fanout_max,
-            )?;
             if super::elicit::gate_destructive(&self.peer, action.name(), &targets).await
                 == super::elicit::DeleteGate::Declined
             {
@@ -156,9 +174,25 @@ impl CodeModeCallGuard for McpCodeModeGuard {
                     action.name()
                 ));
             }
+            *self
+                .destructive_authorized
+                .lock()
+                .map_err(|_| "Code Mode destructive authorization state is unavailable")? = true;
             Ok(())
         })
     }
+}
+
+/// Build the complete conservative authorization set for one Code Mode script.
+/// The script can issue dynamic calls, so it cannot safely authorize only the
+/// first inner target it happens to dispatch. Use every configured service,
+/// canonicalized and capped before elicitation; authorization is retained only
+/// by the script-local [`McpCodeModeGuard`].
+pub(crate) fn codemode_destructive_targets(
+    configured_services: &[String],
+    fanout_max: usize,
+) -> Result<Vec<String>, String> {
+    super::rmcp_server::destructive_targets(configured_services, fanout_max)
 }
 
 fn destructive_inner_call<'a>(state: &AppState, action: &'a YarrAction) -> (bool, &'a str) {

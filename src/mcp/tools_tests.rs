@@ -90,6 +90,27 @@ async fn fleet_readonly_rejects_generated_post_before_transport() {
     assert!(error.to_string().contains("YARR_FLEET_READONLY"));
 }
 
+#[test]
+fn codemode_destructive_targets_cover_the_entire_configured_fleet_before_eliciting() {
+    assert_eq!(
+        super::codemode_destructive_targets(&["sonarr".to_owned()], 3)
+            .expect("one target is within the cap"),
+        vec!["sonarr"],
+    );
+
+    let error = super::codemode_destructive_targets(
+        &[
+            "sonarr".to_owned(),
+            "radarr".to_owned(),
+            "plex".to_owned(),
+            "jellyfin".to_owned(),
+        ],
+        3,
+    )
+    .expect_err("a four-target Code Mode destructive run must fail before elicitation");
+    assert!(error.contains("maximum is 3"));
+}
+
 #[tokio::test]
 async fn read_authorized_codemode_cannot_invoke_local_file_writer() {
     let _command = install_test_curated_command(CommandDescriptor {
