@@ -207,6 +207,25 @@ fn body_preview_redacts_plex_token_aliases_in_json_and_query_shapes() {
 }
 
 #[test]
+fn body_preview_redacts_plaintext_plex_token_aliases_without_overredacting() {
+    let preview = body_preview(
+        "Plex rejected request: AccessToken: PLAIN_ALIAS_COLON_SECRET, AUTH_token PLAIN_ALIAS_SPACE_SECRET; retry https://plex.example/identity",
+    );
+    for secret in ["PLAIN_ALIAS_COLON_SECRET", "PLAIN_ALIAS_SPACE_SECRET"] {
+        assert!(!preview.contains(secret), "secret leaked: {preview}");
+    }
+    assert_eq!(preview.matches("[redacted]").count(), 2, "got: {preview}");
+    assert!(
+        preview.contains("Plex rejected request"),
+        "lost diagnosis: {preview}"
+    );
+    assert!(
+        preview.contains("https://plex.example/identity"),
+        "over-redacted URL: {preview}"
+    );
+}
+
+#[test]
 fn body_preview_leaves_non_secret_json_untouched() {
     let preview = body_preview(r#"{"title":"My Movie","year":2020}"#);
     assert!(preview.contains("My Movie"), "got: {preview}");

@@ -57,13 +57,17 @@ fn duplicate_identifier_is_ambiguous_and_not_paired() {
 async fn configured_plex_pairing_error_redacts_plex_credentials_from_http_body() {
     const ACCESS_TOKEN: &str = "PAIRING_ERROR_ACCESS_TOKEN_SECRET";
     const AUTH_TOKEN: &str = "PAIRING_ERROR_AUTH_TOKEN_SECRET";
+    const PLAINTEXT_COLON_TOKEN: &str = "PAIRING_PLAINTEXT_COLON_UNIQUE_SECRET";
+    const PLAINTEXT_SPACE_TOKEN: &str = "PAIRING_PLAINTEXT_SPACE_UNIQUE_SECRET";
     let app = axum::Router::new().route(
         "/plex/identity",
         axum::routing::get(|| async {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                [("content-type", "application/json")],
-                format!(r#"{{"accessToken":"{ACCESS_TOKEN}","authToken":"{AUTH_TOKEN}","message":"Plex identity failed"}}"#),
+                [("content-type", "text/plain")],
+                format!(
+                    "Plex identity failed: accessToken: {PLAINTEXT_COLON_TOKEN}, authToken {PLAINTEXT_SPACE_TOKEN}; json accessToken={ACCESS_TOKEN}&authToken={AUTH_TOKEN}"
+                ),
             )
         }),
     );
@@ -85,14 +89,14 @@ async fn configured_plex_pairing_error_redacts_plex_credentials_from_http_body()
         .await
         .expect_err("configured Plex HTTP errors must reach the pairing caller");
     let rendered = error.to_string();
-    assert!(
-        !rendered.contains(ACCESS_TOKEN),
-        "access token leaked: {rendered}"
-    );
-    assert!(
-        !rendered.contains(AUTH_TOKEN),
-        "auth token leaked: {rendered}"
-    );
+    for secret in [
+        ACCESS_TOKEN,
+        AUTH_TOKEN,
+        PLAINTEXT_COLON_TOKEN,
+        PLAINTEXT_SPACE_TOKEN,
+    ] {
+        assert!(!rendered.contains(secret), "credential leaked: {rendered}");
+    }
     assert!(
         rendered.contains("Plex identity failed"),
         "lost diagnosis: {rendered}"

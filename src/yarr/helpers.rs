@@ -290,10 +290,9 @@ const SECRET_KEYS: &[&str] = &[
     "password",
 ];
 
-/// Truncated, secret-redacted preview of a response body for error messages.
-///
-/// Redacts two secret shapes (LOW-1): query-string `key=value` pairs and
-/// JSON-style `"key":"value"` members, for a fixed set of credential key names
+/// Redacts three secret shapes (LOW-1): query-string `key=value` pairs,
+/// plaintext `key: value`/`key value` fragments, and JSON-style
+/// `"key":"value"` members, for a fixed set of credential key names
 /// (case-insensitive). The 160-char cap and control-char stripping are applied
 /// first, so redaction operates on the already-truncated preview.
 pub fn body_preview(text: &str) -> String {
@@ -302,27 +301,75 @@ pub fn body_preview(text: &str) -> String {
         .filter(|ch| !ch.is_control() || ch.is_whitespace())
         .take(160)
         .collect();
-    // Query-style redaction shares `SECRET_KEYS` with JSON-member redaction.
-    // A key-specific pass runs before the generic `token=` suffix so output
-    // preserves only `[redacted]`, never a partially retained credential name.
-    for key in SECRET_KEYS {
-        let needle = format!("{key}=");
-        // `key` is lowercase; only the mutating preview needs case-folding
-        // because `replace_range` shifts offsets.
-        while let Some(index) = preview.to_ascii_lowercase().find(&needle) {
-            let end = preview[index..]
-                .find(['&', ' ', '\n', '\r'])
-                .map(|offset| index + offset)
-                .unwrap_or(preview.len());
-            preview.replace_range(index..end, "[redacted]");
-        }
-    }
+    redact_plaintext_secrets(&mut preview);
     redact_json_secrets(&mut preview);
     if preview.trim().is_empty() {
         "<empty body>".into()
     } else {
         preview
     }
+}
+
+/// Redact unquoted `key=value`, `key: value`, and `key value` credentials.
+///
+/// A credential alias must begin at a text-token boundary, so a word such as
+/// `notaccessToken` and URL path text are not mistaken for credentials. Values
+/// end at common text, form, or bracket delimiters; the delimiter is retained
+/// so surrounding diagnostic text stays readable.
+fn redact_plaintext_secrets(preview: &mut String) {
+    for key in SECRET_KEYS {
+        let mut from = 0;
+        loop {
+            let lower = preview.to_ascii_lowercase();
+            let Some(rel) = lower[from..].find(key) else {
+                break;
+            };
+            let key_at = from + rel;
+            let after_key = key_at + key.len();
+            if !is_plaintext_key_boundary(preview, key_at) {
+                from = after_key;
+                continue;
+            }
+
+            let bytes = preview.as_bytes();
+            let mut value_start = after_key;
+            while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                value_start += 1;
+            }
+            if value_start == after_key {
+                if !matches!(bytes.get(value_start), Some(b'=' | b':')) {
+                    from = after_key;
+                    continue;
+                }
+                value_start += 1;
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+            }
+            if value_start == bytes.len() || is_secret_value_delimiter(bytes[value_start]) {
+                from = after_key;
+                continue;
+            }
+            let value_end = bytes[value_start..]
+                .iter()
+                .position(|byte| is_secret_value_delimiter(*byte))
+                .map(|offset| value_start + offset)
+                .unwrap_or(bytes.len());
+            preview.replace_range(key_at..value_end, "[redacted]");
+            from = key_at + "[redacted]".len();
+        }
+    }
+}
+
+fn is_plaintext_key_boundary(preview: &str, key_at: usize) -> bool {
+    preview[..key_at].chars().next_back().is_none_or(|ch| {
+        ch.is_ascii_whitespace() || matches!(ch, '[' | '{' | '(' | ',' | ';' | '&' | '?')
+    })
+}
+
+fn is_secret_value_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || matches!(byte, b',' | b';' | b'&' | b']' | b'}' | b')' | b'"' | b'\'')
 }
 
 /// Redact JSON-style secret members `"<key>":"<value>"` in place, case-insensitive
